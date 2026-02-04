@@ -246,7 +246,6 @@ def get_entity_data(
                     if title_raw:
                         title = normalize_string(title_raw)
                 elif isinstance(b24_labels, str):
-                    # Если labels - строка, пробуем распарсить как JSON
                     try:
                         import json
                         labels_dict = json.loads(b24_labels) if isinstance(b24_labels, str) else b24_labels
@@ -280,11 +279,8 @@ def get_entity_data(
             # 4. Если title все еще нет, создаем понятное имя из b24_field
             if not title:
                 if b24_field:
-                    # Для UF полей пробуем извлечь понятное имя
                     if b24_field.startswith("UF_CRM_") or b24_field.startswith("ufCrm"):
-                        # Используем column_name, но убираем префикс uf и делаем более читаемым
                         if col_name:
-                            # Убираем префикс ufcrm и цифры, оставляем только понятную часть
                             readable = col_name.replace("ufcrm", "").replace("_", " ").strip()
                             if readable:
                                 title = readable.title()
@@ -293,10 +289,8 @@ def get_entity_data(
                         else:
                             title = b24_field
                     else:
-                        # Для обычных полей используем b24_field
                         title = b24_field
                 else:
-                    # Последний fallback - column_name
                     title = col_name or "Неизвестное поле"
             
             if col_name:
@@ -304,7 +298,7 @@ def get_entity_data(
                     "b24_field": b24_field,
                     "column_name": col_name,
                     "title": title,
-                    "name": title,  # Дублируем для удобства
+                    "name": title,
                     "b24_type": meta.get("b24_type")
                 }
             
@@ -314,37 +308,28 @@ def get_entity_data(
         # Формируем список колонок для SELECT
         selected_fields = []
         if fields:
-            # Если указаны конкретные поля, используем их
             requested_fields = [f.strip() for f in fields.split(",")]
             for req_field in requested_fields:
-                # Проверяем, существует ли колонка в таблице
                 if req_field in all_columns:
                     selected_fields.append(req_field)
         else:
-            # Если поля не указаны, берем ВСЕ колонки из таблицы
             selected_fields = all_columns.copy()
         
-        # Всегда добавляем базовые поля в начало, если их еще нет
         base_fields = ["id", "raw"]
         for bf in base_fields:
             if bf in all_columns and bf not in selected_fields:
                 selected_fields.insert(0, bf)
         
-        # Формируем список полей с мета-информацией для ответа
-        # ВАЖНО: Возвращаем только человеко-читаемые названия, без технических имен
         fields_info = []
         for col in selected_fields:
             if col in field_meta_map:
                 meta = field_meta_map[col]
-                # Возвращаем только человеко-читаемую информацию
                 fields_info.append({
                     "title": meta.get("title"),
-                    "name": meta.get("name"),  # Дубликат title для удобства
-                    "type": meta.get("b24_type")  # Тип поля (для информации)
+                    "name": meta.get("name"),
+                    "type": meta.get("b24_type")
                 })
             else:
-                # Для полей, которых нет в мета-таблице (например, id, raw, created_at, updated_at)
-                # Используем понятные названия для базовых полей
                 base_field_titles = {
                     "id": "ID",
                     "raw": "Данные (JSON)",
@@ -358,15 +343,12 @@ def get_entity_data(
                     "type": None
                 })
         
-        # Формируем SQL запрос
         columns_str = ", ".join([f'"{col}"' for col in selected_fields])
         
-        # Подсчитываем общее количество записей
         with conn.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
             total_count = cur.fetchone()[0] if cur.rowcount > 0 else 0
         
-        # Получаем данные с пагинацией
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             sql = f"""
                 SELECT {columns_str}
@@ -377,32 +359,22 @@ def get_entity_data(
             cur.execute(sql, (limit, offset))
             rows = cur.fetchall()
         
-        # Формируем ответ с человеко-читаемыми названиями
         data = []
         for row in rows:
             record = {}
             for idx, col in enumerate(selected_fields):
                 value = row.get(col)
-                # Получаем мета-информацию о поле
                 field_info = fields_info[idx] if idx < len(fields_info) else None
                 title = field_info.get("title") if field_info else col
                 
-                # Нормализуем значение, если это строка (исправляем проблемы с кодировкой)
                 try:
                     if isinstance(value, str):
                         value = normalize_string(value)
                     elif isinstance(value, (dict, list)):
-                        # Если значение - словарь или список, нормализуем все строки внутри
                         value = normalize_nested_data(value)
-                    elif value is not None:
-                        # Для других типов (числа, даты и т.д.) оставляем как есть
-                        pass
                 except Exception as e:
-                    # В случае ошибки нормализации оставляем оригинальное значение
                     print(f"WARNING: Error normalizing value for field {col}: {e}", file=sys.stderr, flush=True)
                 
-                # ВАЖНО: Используем ТОЛЬКО title (человеко-читаемое название) как ключ
-                # Фронтенд не должен видеть технические имена типа "ufCrm34_1749209523"
                 record[title] = value
             data.append(record)
         

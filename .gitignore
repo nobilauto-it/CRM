@@ -19,3 +19,6 @@ venv/
 
 # Logs
 *.log
+
+# 999.md черновики (payload без отправки на 999)
+999md_drafts/

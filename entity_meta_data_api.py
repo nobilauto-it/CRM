@@ -1,0 +1,557 @@
+"""
+API значений полей сущностей: тип сущности + пагинация на вход, записи (значения полей) на выход.
+Соответствует полям из /api/entity-meta-fields/ — ключи в каждой записи = human_title.
+Значения расшифровываются: Ответственный/Кем создана — имя пользователя, Контакт — имя контакта,
+Лид — название лида, Источник — название из классификатора (и т.д.).
+GET /api/entity-meta-data/?type=deal&limit=10&offset=0
+GET /api/entity-meta-data/?type=smart_process&entity_key=sp:1114&limit=10&offset=0
+"""
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
+import psycopg2
+import psycopg2.extras
+from fastapi import APIRouter, HTTPException, Query
+
+from api_data import pg_conn
+from entity_meta_fields_api import (
+    table_name_for_entity,
+    normalize_string,
+    _human_title_from_row,
+)
+
+
+router = APIRouter(prefix="/api/entity-meta-data", tags=["entity-meta-data"])
+
+
+def _normalize_value(value: Any) -> Any:
+    """Нормализует значение для ответа (строки, вложенные dict/list)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return normalize_string(value)
+    if isinstance(value, dict):
+        return {k: _normalize_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_value(item) for item in value]
+    return value
+
+
+def _table_has_column(conn, table_name: str, column_name: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+        """, (table_name, column_name))
+        return cur.fetchone() is not None
+
+
+def _col_to_human_title_map(conn, entity_key: str) -> Dict[str, str]:
+    """
+    Возвращает маппинг column_name -> human_title для сущности.
+    Для сделок: если есть колонка assigned_by_name, используем её для «Ответственный» вместо assigned_by_id.
+    """
+    table_name = table_name_for_entity(entity_key)
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT b24_field, column_name, b24_type, is_multiple,
+                   b24_title, b24_labels, settings
+            FROM b24_meta_fields
+            WHERE entity_key = %s
+            ORDER BY b24_field
+        """, (entity_key,))
+        rows = cur.fetchall()
+
+    if rows:
+        col_to_title: Dict[str, str] = {}
+        use_assigned_by_name = (
+            entity_key == "deal"
+            and _table_has_column(conn, table_name, "assigned_by_name")
+        )
+        for row in rows:
+            col = row.get("column_name") or row.get("b24_field") or ""
+            if not col:
+                continue
+            title = _human_title_from_row(row)
+            if use_assigned_by_name and col == "assigned_by_id":
+                continue
+            if use_assigned_by_name and col == "assigned_by_name":
+                title = "Ответственный"
+            col_to_title[col] = title
+        return col_to_title
+
+    with conn.cursor() as cur:
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                ORDER BY ordinal_position
+            """, (table_name,))
+            cols = [row[0] for row in cur.fetchall()] if cur.rowcount else []
+        except Exception:
+            cols = []
+    base_titles = {
+        "id": "ID", "raw": "Данные (JSON)", "created_at": "Дата создания", "updated_at": "Дата обновления",
+        "title": "Название", "name": "Имя", "last_name": "Фамилия", "second_name": "Отчество",
+        "phone": "Телефон", "email": "Email", "company_id": "ID компании", "assigned_by_id": "Ответственный",
+        "assigned_by_name": "Ответственный", "status_id": "Статус", "source_id": "Источник",
+        "opportunity": "Сумма", "currency_id": "Валюта",
+    }
+    return {col: base_titles.get(col, col.replace("_", " ").title()) for col in cols}
+
+
+def _infer_column_type(column_name: str) -> Optional[str]:
+    """По имени колонки подсказать тип для расшифровки (если нет в meta)."""
+    c = (column_name or "").strip().lower()
+    if not c:
+        return None
+    if c in ("assigned_by_id", "created_by_id", "modified_by_id", "moved_by_id",
+             "last_activity_by", "last_activity_by_id", "created_by", "modified_by"):
+        return "user"
+    if c in ("contact_id", "contact", "contact_ids"):
+        return "crm_contact"
+    if c in ("lead_id", "lead", "lead_id"):
+        return "crm_lead"
+    if c == "source_id":
+        return "source_id"
+    return None
+
+
+def _load_meta_column_types(conn, entity_key: str) -> Dict[str, str]:
+    """Маппинг column_name -> b24_type для сущности (для расшифровки значений)."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT column_name, b24_type
+            FROM b24_meta_fields
+            WHERE entity_key = %s
+        """, (entity_key,))
+        rows = cur.fetchall()
+    out = {}
+    for row in rows or []:
+        col = row.get("column_name")
+        if not col:
+            continue
+        t = (row.get("b24_type") or "").strip().lower()
+        if t:
+            out[col] = t
+    return out
+
+
+def _col_types_with_infer(conn, entity_key: str, columns: List[str], col_types: Dict[str, str]) -> Dict[str, str]:
+    """Дополняет col_types выведенным типом по имени колонки для колонок без meta."""
+    result = dict(col_types)
+    for col in columns:
+        if col in result:
+            continue
+        inferred = _infer_column_type(col)
+        if inferred:
+            result[col] = inferred
+    return result
+
+
+def _load_sources_classifier(conn) -> Dict[str, str]:
+    """source_id -> source_name из b24_classifier_sources. Добавляем ключи в верхнем регистре для поиска без учёта регистра."""
+    out: Dict[str, str] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT source_id, source_name FROM b24_classifier_sources")
+            for row in cur.fetchall() or []:
+                sid = row.get("source_id")
+                if sid is not None:
+                    s = str(sid).strip()
+                    name = normalize_string(row.get("source_name") or "")
+                    out[s] = name
+                    if s.upper() != s:
+                        out[s.upper()] = name
+    except Exception:
+        pass
+    return out
+
+
+def _load_contact_names(conn, ids: List[int]) -> Dict[str, str]:
+    """id -> имя контакта (NAME LAST_NAME из raw)."""
+    if not ids:
+        return {}
+    out: Dict[str, str] = {}
+    tbl = table_name_for_entity("contact")
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            f'SELECT id, raw FROM "{tbl}" WHERE id = ANY(%s)',
+            (ids,),
+        )
+        for row in cur.fetchall() or []:
+            uid = row.get("id")
+            if uid is None:
+                continue
+            raw = row.get("raw") or {}
+            name = (raw.get("NAME") or raw.get("name") or "").strip()
+            last = (raw.get("LAST_NAME") or raw.get("last_name") or "").strip()
+            out[str(uid)] = normalize_string(f"{name} {last}".strip() or raw.get("TITLE") or raw.get("title") or str(uid))
+    return out
+
+
+def _load_lead_titles(conn, ids: List[int]) -> Dict[str, str]:
+    """id -> название лида (TITLE из raw)."""
+    if not ids:
+        return {}
+    out: Dict[str, str] = {}
+    tbl = table_name_for_entity("lead")
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            f'SELECT id, raw FROM "{tbl}" WHERE id = ANY(%s)',
+            (ids,),
+        )
+        for row in cur.fetchall() or []:
+            uid = row.get("id")
+            if uid is None:
+                continue
+            raw = row.get("raw") or {}
+            title = raw.get("TITLE") or raw.get("title") or raw.get("NAME") or raw.get("name") or str(uid)
+            out[str(uid)] = normalize_string(str(title))
+    return out
+
+
+def _load_user_names(conn, ids: List[str]) -> Dict[str, str]:
+    """id -> name из таблицы b24_users (кэш заполняется в app.py по вебхуку/крон)."""
+    int_ids: List[int] = []
+    for x in ids:
+        try:
+            int_ids.append(int(str(x).strip()))
+        except (TypeError, ValueError):
+            pass
+    if not int_ids:
+        return {}
+    out: Dict[str, str] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, name FROM b24_users WHERE id = ANY(%s)", (int_ids,))
+            for row in cur.fetchall() or []:
+                uid = row.get("id")
+                if uid is not None:
+                    out[str(uid)] = normalize_string(row.get("name") or str(uid))
+    except Exception as e:
+        print(f"WARNING: _load_user_names: {e}", file=sys.stderr, flush=True)
+    return out
+
+
+def _load_col_to_b24_field(conn, entity_key: str) -> Dict[str, str]:
+    """column_name -> b24_field для сущности (из b24_meta_fields)."""
+    out: Dict[str, str] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT column_name, b24_field FROM b24_meta_fields WHERE entity_key = %s
+            """, (entity_key,))
+            for row in cur.fetchall() or []:
+                col = row.get("column_name")
+                b24 = row.get("b24_field")
+                if col and b24:
+                    out[col] = b24
+    except Exception:
+        pass
+    return out
+
+
+def _load_deal_categories(conn) -> Dict[str, str]:
+    """category_id -> name из b24_deal_categories."""
+    out: Dict[str, str] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, name FROM b24_deal_categories")
+            for row in cur.fetchall() or []:
+                cid = row.get("id")
+                if cid is not None:
+                    out[str(cid)] = normalize_string(row.get("name") or str(cid))
+    except Exception:
+        pass
+    return out
+
+
+def _load_deal_stages(conn) -> Dict[str, str]:
+    """stage_id -> name из b24_deal_stages."""
+    out: Dict[str, str] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT stage_id, name FROM b24_deal_stages")
+            for row in cur.fetchall() or []:
+                sid = row.get("stage_id")
+                if sid is not None:
+                    out[str(sid)] = normalize_string(row.get("name") or str(sid))
+    except Exception:
+        pass
+    return out
+
+
+def _load_field_enum_map(conn, entity_key: str, b24_fields: List[str]) -> Dict[Tuple[str, str], str]:
+    """(b24_field, value_id) -> value_title из b24_field_enum для указанных полей."""
+    out: Dict[Tuple[str, str], str] = {}
+    if not b24_fields:
+        return out
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT b24_field, value_id, value_title FROM b24_field_enum
+                WHERE entity_key = %s AND b24_field = ANY(%s)
+            """, (entity_key, b24_fields))
+            for row in cur.fetchall() or []:
+                fld = row.get("b24_field")
+                vid = row.get("value_id")
+                title = row.get("value_title")
+                if fld is not None and vid is not None:
+                    out[(str(fld), str(vid))] = normalize_string(title or str(vid))
+    except Exception:
+        pass
+    return out
+
+
+def _source_value_to_title(val: Any, sources: Dict[str, str]) -> Any:
+    """Подставляет название источника по ID; значение может быть 'id' или 'id|TYPE' (например UC_Z315Y5 или 60|TELEGRAM)."""
+    if val is None:
+        return val
+    s = str(val).strip()
+    if not s:
+        return val
+    if s in sources:
+        return sources[s]
+    if s.upper() in sources:
+        return sources[s.upper()]
+    if "|" in s:
+        key = s.split("|")[0].strip()
+        if key and key in sources:
+            return sources[key]
+        if key and key.upper() in sources:
+            return sources[key.upper()]
+    return val
+
+
+def _enum_value_to_title(val: Any, field_enum_map: Dict[Tuple[str, str], str], b24_field: str) -> Any:
+    """Подставляет название по value_id; значение может быть 'id' или 'id|extra' (например 0|MDL)."""
+    if val is None:
+        return val
+    s = str(val).strip()
+    if not s:
+        return val
+    key_id = s.split("|")[0].strip() if "|" in s else s
+    if key_id and (b24_field, key_id) in field_enum_map:
+        return field_enum_map[(b24_field, key_id)]
+    if (b24_field, s) in field_enum_map:
+        return field_enum_map[(b24_field, s)]
+    return val
+
+
+def _decode_record(
+    record: Dict[str, Any],
+    entity_key: str,
+    col_to_title: Dict[str, str],
+    title_to_col: Dict[str, str],
+    col_types: Dict[str, str],
+    sources: Dict[str, str],
+    contact_names: Dict[str, str],
+    lead_titles: Dict[str, str],
+    user_names_map: Dict[str, str],
+    categories_map: Optional[Dict[str, str]] = None,
+    stages_map: Optional[Dict[str, str]] = None,
+    field_enum_map: Optional[Dict[Tuple[str, str], str]] = None,
+    col_to_b24_field: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    Подставляет в record человекочитаемые значения вместо ID для полей типа user, crm_contact, crm_lead,
+    source, category_id, stage_id и enum/списочных полей (UF_CRM_* и др.).
+    Все данные только из БД (b24_users, b24_crm_contact, b24_crm_lead, b24_classifier_sources,
+    b24_deal_categories, b24_deal_stages, b24_field_enum).
+    """
+    categories_map = categories_map or {}
+    stages_map = stages_map or {}
+    field_enum_map = field_enum_map or {}
+    col_to_b24_field = col_to_b24_field or {}
+    for title, col in title_to_col.items():
+        val = record.get(title)
+        if val is None and title not in record:
+            continue
+        t = (col_types.get(col) or "").strip().lower()
+        if entity_key == "deal" and (col in ("category_id", "categoryid") or col and col.upper() == "CATEGORY_ID"):
+            if val is not None and str(val).strip():
+                record[title] = categories_map.get(str(val).strip(), val)
+            continue
+        if entity_key == "deal" and (col in ("stage_id", "stageid") or col and col.upper() == "STAGE_ID"):
+            if val is not None and str(val).strip():
+                record[title] = stages_map.get(str(val).strip(), val)
+            continue
+        if t in ("user", "crm_user", "assigned_by"):
+            if val is None:
+                continue
+            key = str(val).strip()
+            record[title] = user_names_map.get(key, val)
+        elif t in ("crm_contact", "contact"):
+            if val is None:
+                continue
+            record[title] = contact_names.get(str(val).strip(), val)
+        elif t in ("crm_lead", "lead"):
+            if val is None:
+                continue
+            record[title] = lead_titles.get(str(val).strip(), val)
+        elif (col == "source_id" or (col and col.upper() == "SOURCE_ID")) and entity_key in ("deal", "lead"):
+            if val is None:
+                continue
+            decoded = _source_value_to_title(val, sources)
+            if decoded == val and field_enum_map and col_to_b24_field.get(col):
+                decoded = _enum_value_to_title(val, field_enum_map, col_to_b24_field[col])
+            if decoded is not val:
+                record[title] = decoded
+        elif t in ("enum", "enumeration", "list") or (field_enum_map and col_to_b24_field.get(col)):
+            b24_f = col_to_b24_field.get(col)
+            if b24_f and val is not None:
+                decoded = _enum_value_to_title(val, field_enum_map, b24_f)
+                if decoded is not val:
+                    record[title] = decoded
+
+
+@router.get("/")
+def get_entity_meta_data(
+    type: str = Query(..., description="Тип сущности: deal, contact, lead, smart_process"),
+    entity_key: Optional[str] = Query(None, description="Для smart_process обязателен, например sp:1114"),
+    limit: int = Query(100, ge=1, le=10000, description="Максимум записей"),
+    offset: int = Query(0, ge=0, description="Смещение"),
+) -> Dict[str, Any]:
+    """
+    Возвращает значения полей сущности: массив записей, ключи в каждой записи = human_title
+    (как в /api/entity-meta-fields/), значения — из БД.
+    """
+    if type not in ("smart_process", "deal", "contact", "lead"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid type: '{type}'. Must be smart_process, deal, contact or lead",
+        )
+
+    if type == "deal":
+        final_entity_key = "deal"
+    elif type == "contact":
+        final_entity_key = "contact"
+    elif type == "lead":
+        final_entity_key = "lead"
+    else:
+        if not entity_key or not entity_key.startswith("sp:"):
+            raise HTTPException(
+                status_code=400,
+                detail="entity_key is required for type=smart_process (e.g. sp:1114)",
+            )
+        final_entity_key = entity_key
+
+    table_name = table_name_for_entity(final_entity_key)
+    conn = pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) AS cnt FROM "{table_name}"')
+            total = cur.fetchone()[0] if cur.rowcount else 0
+
+        col_to_title = _col_to_human_title_map(conn, final_entity_key)
+        if not col_to_title:
+            return {
+                "ok": True,
+                "entity_key": final_entity_key,
+                "type": type,
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "data": [],
+            }
+
+        columns = list(col_to_title.keys())
+        columns_str = ", ".join(f'"{c}"' for c in columns)
+        title_to_col = {title: col for col, title in col_to_title.items()}
+        col_types = _col_types_with_infer(
+            conn, final_entity_key, columns, _load_meta_column_types(conn, final_entity_key)
+        )
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f'SELECT {columns_str} FROM "{table_name}" ORDER BY id DESC LIMIT %s OFFSET %s',
+                (limit, offset),
+            )
+            rows = cur.fetchall()
+
+        contact_ids: List[int] = []
+        lead_ids: List[int] = []
+        user_ids: List[str] = []
+        for col, t in col_types.items():
+            if t in ("crm_contact", "contact"):
+                for row in rows:
+                    v = row.get(col)
+                    if v is not None and str(v).strip():
+                        try:
+                            contact_ids.append(int(v))
+                        except (TypeError, ValueError):
+                            pass
+            elif t in ("crm_lead", "lead"):
+                for row in rows:
+                    v = row.get(col)
+                    if v is not None and str(v).strip():
+                        try:
+                            lead_ids.append(int(v))
+                        except (TypeError, ValueError):
+                            pass
+            elif t in ("user", "crm_user", "assigned_by"):
+                for row in rows:
+                    v = row.get(col)
+                    if v is not None and str(v).strip():
+                        user_ids.append(str(v).strip())
+
+        sources_map = _load_sources_classifier(conn) if final_entity_key in ("deal", "lead") else {}
+        contact_names_map = _load_contact_names(conn, list(dict.fromkeys(contact_ids))) if contact_ids else {}
+        lead_titles_map = _load_lead_titles(conn, list(dict.fromkeys(lead_ids))) if lead_ids else {}
+        user_ids_unique = list(dict.fromkeys(user_ids))
+        user_names_map = _load_user_names(conn, user_ids_unique) if user_ids_unique else {}
+
+        col_to_b24 = _load_col_to_b24_field(conn, final_entity_key)
+        categories_map = _load_deal_categories(conn) if final_entity_key == "deal" else {}
+        stages_map = _load_deal_stages(conn) if final_entity_key == "deal" else {}
+        b24_fields_for_enum = list(dict.fromkeys(col_to_b24.values())) if col_to_b24 else []
+        field_enum_map = _load_field_enum_map(conn, final_entity_key, b24_fields_for_enum) if b24_fields_for_enum else {}
+
+        data: List[Dict[str, Any]] = []
+        for row in rows:
+            record: Dict[str, Any] = {}
+            for col in columns:
+                title = col_to_title.get(col, col)
+                value = row.get(col)
+                try:
+                    record[title] = _normalize_value(value)
+                except Exception as e:
+                    print(f"WARNING: entity-meta-data normalize {col}: {e}", file=sys.stderr, flush=True)
+                    record[title] = value
+            _decode_record(
+                record,
+                final_entity_key,
+                col_to_title,
+                title_to_col,
+                col_types,
+                sources_map,
+                contact_names_map,
+                lead_titles_map,
+                user_names_map,
+                categories_map=categories_map,
+                stages_map=stages_map,
+                field_enum_map=field_enum_map,
+                col_to_b24_field=col_to_b24,
+            )
+            data.append(record)
+
+        return {
+            "ok": True,
+            "entity_key": final_entity_key,
+            "type": type,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "data": data,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

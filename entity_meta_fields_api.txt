@@ -1,0 +1,166 @@
+================================================================================
+API entity-meta-fields — метаданные полей сущностей CRM
+================================================================================
+Дата создания документа: 29.01.2026
+Файл API: entity_meta_fields_api.py
+Роутер: /api/entity-meta-fields
+================================================================================
+
+1. НАЗНАЧЕНИЕ
+--------------------------------------------------------------------------------
+API возвращает список полей выбранной сущности (сделки, контакты, лиды,
+смарт-процессы) из БД. Для каждого поля отдаются:
+  - системное имя в Bitrix (b24_field),
+  - имя колонки в БД (column_name),
+  - человеко-читаемое название (human_title),
+  - тип поля (field_type).
+
+Для полей-ссылок на другие сущности (crm_contact, crm_lead, crm_entity)
+дополнительно подставляется один уровень вложенности — список полей той
+сущности (nested_fields), без рекурсии.
+
+
+2. ЭНДПОИНТ
+--------------------------------------------------------------------------------
+  GET /api/entity-meta-fields/
+
+Параметры запроса (query):
+  - type (обязательный): тип сущности.
+    Допустимые значения: "deal" | "contact" | "lead" | "smart_process".
+
+  - entity_key (обязательный только для type=smart_process): ключ смарт-процесса.
+    Формат: "sp:<entity_type_id>", например "sp:1114".
+
+Примеры:
+  GET /api/entity-meta-fields/?type=deal
+  GET /api/entity-meta-fields/?type=contact
+  GET /api/entity-meta-fields/?type=lead
+  GET /api/entity-meta-fields/?type=smart_process&entity_key=sp:1114
+
+
+3. СТРУКТУРА ОТВЕТА
+--------------------------------------------------------------------------------
+  {
+    "ok": true,
+    "entity_key": "<ключ сущности, например deal или sp:1114>",
+    "type": "<type из запроса>",
+    "fields_count": <число полей>,
+    "fields": [
+      {
+        "id": <порядковый номер 1, 2, 3, ...>,
+        "b24_field": "<системное имя в Bitrix, например SOURCE_ID, parentId1114>",
+        "column_name": "<имя колонки в БД, например source_id, parentid1114>",
+        "human_title": "<человеко-читаемое название, например Источник, STOCK AUTO>",
+        "field_type": "<тип: string, integer, date, boolean, Списочное поле, crm_entity, crm_contact, crm_lead и т.д.>"
+        [, "nested_fields": [ <массив таких же объектов — поля связанной сущности> ]]
+      },
+      ...
+    ]
+  }
+
+Поле "nested_fields" присутствует только у полей типа crm_contact, crm_lead
+или crm_entity (или у полей с именем вида parentId<N>). У остальных полей
+nested_fields нет.
+
+
+4. ИСТОЧНИКИ ДАННЫХ (БД)
+--------------------------------------------------------------------------------
+  - b24_meta_fields
+    Основная таблица метаданных полей. Колонки: entity_key, b24_field,
+    column_name, b24_type, is_multiple, is_required, is_readonly,
+    b24_title, b24_labels, settings. По entity_key выбираются все поля
+    сущности.
+
+  - b24_meta_entities
+    Справочник сущностей (entity_key, entity_type_id, title, entity_kind).
+    Используется для разрешения crm_entity по человеческому названию
+    (human_title), если entity_key не удалось получить из parentId или
+    из settings.
+
+  - information_schema.columns
+    Fallback: если для entity_key в b24_meta_fields нет записей, список
+    полей берётся по колонкам таблицы сущности (b24_crm_deal,
+    b24_crm_contact, b24_crm_lead, b24_sp_f_<id>). Тип полей в этом
+    случае отдаётся как "string".
+
+
+5. ОПРЕДЕЛЕНИЕ entity_key ДЛЯ ВЛОЖЕННЫХ ПОЛЕЙ
+--------------------------------------------------------------------------------
+Для полей crm_contact и crm_lead сущность всегда одна:
+  - crm_contact → entity_key = "contact"
+  - crm_lead    → entity_key = "lead"
+
+Для crm_entity (и для полей с именем parentId<N>) порядок определения
+entity_key такой:
+
+  1) parentId в имени поля (b24_field или column_name)
+     Паттерн: parentId<N> или parentid<N> (регистр не важен).
+     - parentId2  → "deal"
+     - parentId3  → "contact"
+     - parentId4  → "lead"
+     - parentId1114, parentId1094 и т.д. → "sp:1114", "sp:1094" (смарт-процесс).
+
+  2) settings поля (JSON)
+     Если в settings есть entityTypeId или entity_type_id — берётся
+     entity_key = "sp:" + значение.
+
+  3) Поиск по human_title в b24_meta_entities
+     Ищется запись с entity_kind = 'smart_process' и title, совпадающим
+     с human_title (без учёта регистра и пробелов). Берётся entity_key.
+
+
+6. ВЛОЖЕННОСТЬ (nested_fields)
+--------------------------------------------------------------------------------
+  - Добавляется только один уровень: у поля-ссылки подставляется список
+    полей связанной сущности. Рекурсия по вложенным crm_* не делается.
+
+  - Сравнение типа поля с "crm_contact", "crm_lead", "crm_entity" выполняется
+    без учёта регистра (в БД может быть CRM_ENTITY и т.п.).
+
+  - Если тип в БД не crm_*, но имя поля имеет вид parentId<N>, вложенность
+    всё равно подставляется по извлечённому entity_key (deal/contact/lead/sp:N).
+
+
+7. ТИПЫ ПОЛЕЙ (field_type)
+--------------------------------------------------------------------------------
+  - Обычные типы из БД (b24_type) отдаются как есть: string, integer, date,
+    datetime, boolean и т.д.
+
+  - Если is_multiple = true или b24_type есть в (enum, enumeration, list),
+    в ответе field_type = "Списочное поле".
+
+  - Если b24_type пустой, отдаётся "string".
+
+
+8. ЧЕЛОВЕКО-ЧИТАЕМОЕ НАЗВАНИЕ (human_title)
+--------------------------------------------------------------------------------
+Приоритет источников:
+  1) b24_title
+  2) b24_labels (title, label, listLabel, formLabel, filterLabel)
+  3) settings (title, label)
+  4) Для полей UF_CRM_/ufCrm — читаемое имя из column_name
+  5) b24_field или column_name
+
+Все строки проходят через normalize_string: исправляется double-encoded
+UTF-8, при этом румынские (ă, â, î, ș, ț) и кириллические буквы не
+перекодируются, чтобы не терять диакритики.
+
+
+9. ОШИБКИ
+--------------------------------------------------------------------------------
+  - 400: неверный type (не из списка deal, contact, lead, smart_process).
+  - 400: для type=smart_process не передан entity_key или entity_key не
+    начинается с "sp:".
+  - 500: ошибка БД или внутренняя ошибка.
+
+
+10. ЗАВИСИМОСТИ
+--------------------------------------------------------------------------------
+  - api_data.pg_conn — подключение к PostgreSQL.
+  - Таблицы: b24_meta_fields, b24_meta_entities; при отсутствии записей —
+    information_schema.columns и таблицы данных (b24_crm_deal, b24_crm_contact,
+    b24_crm_lead, b24_sp_f_<entity_type_id>).
+
+================================================================================
+Конец документа
+================================================================================

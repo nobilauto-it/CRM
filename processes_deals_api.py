@@ -130,33 +130,34 @@ def get_processes_and_deals() -> Dict[str, Any]:
                 
                 entities.append({
                     "type": "smart_process",
+                    "entity_key": entity_key or f"sp:{entity_type_id}",
                     "entity_type_id": entity_type_id,
-                    "entity_key": entity_key,
                     "title": title,
-                    "table_name": table_name,
                     "total": total
                 })
-        
-        # Добавляем информацию о сделках
-        entities.append({
-            "type": "deal",
-            "entity_key": "deal",
-            "title": "CRM Deal"
-        })
-        
-        # Добавляем информацию о контактах
-        entities.append({
-            "type": "contact",
-            "entity_key": "contact",
-            "title": "CRM Contact"
-        })
-        
-        # Добавляем информацию о лидах
-        entities.append({
-            "type": "lead",
-            "entity_key": "lead",
-            "title": "CRM Lead"
-        })
+            
+            # Добавляем сделки, контакты, лиды (только type, title, total)
+            for etype, ekey, etitle in [
+                ("deal", "deal", "CRM Deal"),
+                ("contact", "contact", "CRM Contact"),
+                ("lead", "lead", "CRM Lead"),
+            ]:
+                total = 0
+                try:
+                    tbl = table_name_for_entity(ekey)
+                    cur.execute(f"SELECT COUNT(*) as cnt FROM {tbl}")
+                    row = cur.fetchone()
+                    if row:
+                        total = int(row.get("cnt", 0) or 0)
+                except Exception:
+                    pass
+                entities.append({
+                    "type": etype,
+                    "entity_key": ekey,
+                    "entity_type_id": None,
+                    "title": etitle,
+                    "total": total
+                })
         
         return {
             "ok": True,

@@ -1,0 +1,74 @@
+{
+  "id": "103367648",
+  "title": "Volkswagen Tiguan",
+  "offer_type": 776,
+  "price": {
+    "id": 2,
+    "value": 9999,
+    "unit": "eur"
+  },
+  "state": "draft",
+  "categories": {
+    "category": {
+      "id": "658",
+      "title": "Транспорт",
+      "url": "transport"
+    },
+    "subcategory": {
+      "id": "659",
+      "title": "Легковые автомобили",
+      "url": "transport/cars"
+    }
+  },
+  "type": "",
+  "views_counter": 0,
+  "autorepublisher": {
+    "enabled": false,
+    "schedule": null
+  },
+  "posted": "2026-01-28T14:28:02+02:00",
+  "republished": "2026-01-28T14:28:02+02:00",
+  "expire": "",
+  "block_reasons": [
+    {
+      "type": "illegal",
+      "title": "Запрещено законодательством или сайтом"
+    }
+  ],
+  "location": {
+    "location_region": "Кишинёв мун.",
+    "location_location": "",
+    "location_sector": "",
+    "location_street": "",
+    "location_building": ""
+  },
+  "images": {
+    "id": 14,
+    "value": [
+      "cfd17971daaa3d1b4b2b320be6bdead3.jpg",
+      "c5b70c2c561c75d8bf615d38a3c3b4ba.jpg",
+      "58db0054bb8dc529b08d111b25c77dc6.jpg",
+      "3f4f0cd0adfae676bb602b7abc901e8d.jpg",
+      "971c9f485ac123779116a3a8db1bb75d.jpg",
+      "c65b74a96f6a8574137c0790b65ed0d3.jpg",
+      "bc8a65a8ba25009418d2d741c36d77e9.jpg",
+      "8b0034332a0312576451550192ee3441.jpg",
+      "e5bc7843d0c85351976f5e103dbca0ee.jpg",
+      "b7db2fe541cfedf63ae3ea545d5770ff.jpg",
+      "2a4cde87cc6d50606979cbbf5dce3707.jpg",
+      "f72fdafeaaebac3deb00bda76ab536ae.jpg",
+      "7d91eb193236bcdc8b08ff7ce6deff3d.jpg"
+    ],
+    "unit": null
+  },
+  "videos": null,
+  "contacts": {
+    "id": 16,
+    "value": {
+      "without_number": true,
+      "phone_numbers": null
+    },
+    "unit": null
+  },
+  "delivery": null
+}

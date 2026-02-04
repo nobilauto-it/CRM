@@ -1,0 +1,2142 @@
+{
+  "features_groups": [
+    {
+      "title": "Общее",
+      "features": [
+        {
+          "id": "20",
+          "title": "Марка",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "34",
+              "title": "BMW"
+            },
+            {
+              "id": "139",
+              "title": "Ford"
+            },
+            {
+              "id": "149",
+              "title": "Honda"
+            },
+            {
+              "id": "111",
+              "title": "Hyundai"
+            },
+            {
+              "id": "130",
+              "title": "KIA"
+            },
+            {
+              "id": "22",
+              "title": "Mercedes"
+            },
+            {
+              "id": "28",
+              "title": "Nissan"
+            },
+            {
+              "id": "143",
+              "title": "Skoda"
+            },
+            {
+              "id": "47",
+              "title": "Toyota"
+            },
+            {
+              "id": "20",
+              "title": "Volkswagen"
+            },
+            {
+              "id": "22223",
+              "title": "ARO"
+            },
+            {
+              "id": "23516",
+              "title": "Abarth"
+            },
+            {
+              "id": "392",
+              "title": "Acura"
+            },
+            {
+              "id": "38968",
+              "title": "Aito"
+            },
+            {
+              "id": "24787",
+              "title": "Aiways"
+            },
+            {
+              "id": "295",
+              "title": "Alfa Romeo"
+            },
+            {
+              "id": "24790",
+              "title": "ArcFox"
+            },
+            {
+              "id": "22887",
+              "title": "Aston Martin"
+            },
+            {
+              "id": "57",
+              "title": "Audi"
+            },
+            {
+              "id": "36217",
+              "title": "Avatr"
+            },
+            {
+              "id": "23696",
+              "title": "BAIC"
+            },
+            {
+              "id": "43030",
+              "title": "BAW"
+            },
+            {
+              "id": "288",
+              "title": "Bentley"
+            },
+            {
+              "id": "748",
+              "title": "Brilliance"
+            },
+            {
+              "id": "43760",
+              "title": "Bugatti"
+            },
+            {
+              "id": "20947",
+              "title": "Buick"
+            },
+            {
+              "id": "487",
+              "title": "Byd"
+            },
+            {
+              "id": "439",
+              "title": "Cadillac"
+            },
+            {
+              "id": "23654",
+              "title": "Changan"
+            },
+            {
+              "id": "119",
+              "title": "Chery"
+            },
+            {
+              "id": "167",
+              "title": "Chevrolet"
+            },
+            {
+              "id": "101",
+              "title": "Chrysler"
+            },
+            {
+              "id": "32",
+              "title": "Citroen"
+            },
+            {
+              "id": "24455",
+              "title": "Cupra"
+            },
+            {
+              "id": "24352",
+              "title": "DS Automobiles"
+            },
+            {
+              "id": "375",
+              "title": "Dacia"
+            },
+            {
+              "id": "99",
+              "title": "Daewoo"
+            },
+            {
+              "id": "132",
+              "title": "Daihatsu"
+            },
+            {
+              "id": "20359",
+              "title": "Datsun"
+            },
+            {
+              "id": "31863",
+              "title": "Denza"
+            },
+            {
+              "id": "89",
+              "title": "Dodge"
+            },
+            {
+              "id": "24796",
+              "title": "Dongfeng"
+            },
+            {
+              "id": "38687",
+              "title": "Exeed"
+            },
+            {
+              "id": "504",
+              "title": "FAW"
+            },
+            {
+              "id": "22889",
+              "title": "Ferrari"
+            },
+            {
+              "id": "41",
+              "title": "Fiat"
+            },
+            {
+              "id": "24719",
+              "title": "GAC"
+            },
+            {
+              "id": "616",
+              "title": "GMC"
+            },
+            {
+              "id": "587",
+              "title": "Geely"
+            },
+            {
+              "id": "24520",
+              "title": "Genesis"
+            },
+            {
+              "id": "202",
+              "title": "Great Wall"
+            },
+            {
+              "id": "22890",
+              "title": "Hafei"
+            },
+            {
+              "id": "521",
+              "title": "Haima"
+            },
+            {
+              "id": "23260",
+              "title": "Haval"
+            },
+            {
+              "id": "36703",
+              "title": "HiPhi"
+            },
+            {
+              "id": "39680",
+              "title": "Hongqi"
+            },
+            {
+              "id": "24782",
+              "title": "Hozon"
+            },
+            {
+              "id": "247",
+              "title": "Hummer"
+            },
+            {
+              "id": "32708",
+              "title": "IM Motors"
+            },
+            {
+              "id": "419",
+              "title": "Infiniti"
+            },
+            {
+              "id": "22891",
+              "title": "Iran Khodro"
+            },
+            {
+              "id": "14",
+              "title": "Isuzu"
+            },
+            {
+              "id": "1049",
+              "title": "Iveco"
+            },
+            {
+              "id": "1667",
+              "title": "JMC"
+            },
+            {
+              "id": "662",
+              "title": "Jac"
+            },
+            {
+              "id": "369",
+              "title": "Jaguar"
+            },
+            {
+              "id": "186",
+              "title": "Jeep"
+            },
+            {
+              "id": "28752",
+              "title": "Jetour"
+            },
+            {
+              "id": "37820",
+              "title": "Jetta"
+            },
+            {
+              "id": "39760",
+              "title": "LEVC"
+            },
+            {
+              "id": "24420",
+              "title": "Lada"
+            },
+            {
+              "id": "85",
+              "title": "Lada / ВАЗ"
+            },
+            {
+              "id": "12462",
+              "title": "Lamborghini"
+            },
+            {
+              "id": "210",
+              "title": "Lancia"
+            },
+            {
+              "id": "291",
+              "title": "Land Rover"
+            },
+            {
+              "id": "24738",
+              "title": "Leapmotor"
+            },
+            {
+              "id": "136",
+              "title": "Lexus"
+            },
+            {
+              "id": "34753",
+              "title": "LiXiang"
+            },
+            {
+              "id": "414",
+              "title": "Lifan"
+            },
+            {
+              "id": "305",
+              "title": "Lincoln"
+            },
+            {
+              "id": "25004",
+              "title": "Linktour"
+            },
+            {
+              "id": "1743",
+              "title": "Lotus"
+            },
+            {
+              "id": "40826",
+              "title": "Lucid"
+            },
+            {
+              "id": "39770",
+              "title": "Luxeed"
+            },
+            {
+              "id": "28447",
+              "title": "Lynk & Co"
+            },
+            {
+              "id": "33046",
+              "title": "MG"
+            },
+            {
+              "id": "1704",
+              "title": "Maserati"
+            },
+            {
+              "id": "45",
+              "title": "Mazda"
+            },
+            {
+              "id": "23296",
+              "title": "McLaren"
+            },
+            {
+              "id": "22892",
+              "title": "Mercedes-Maybach"
+            },
+            {
+              "id": "22893",
+              "title": "Mercury"
+            },
+            {
+              "id": "577",
+              "title": "Mini"
+            },
+            {
+              "id": "36",
+              "title": "Mitsubishi"
+            },
+            {
+              "id": "34747",
+              "title": "NIO"
+            },
+            {
+              "id": "1",
+              "title": "Opel"
+            },
+            {
+              "id": "43878",
+              "title": "Ora"
+            },
+            {
+              "id": "24773",
+              "title": "Oshan"
+            },
+            {
+              "id": "76",
+              "title": "Peugeot"
+            },
+            {
+              "id": "1125",
+              "title": "Piaggio"
+            },
+            {
+              "id": "43661",
+              "title": "Polar Stone"
+            },
+            {
+              "id": "39267",
+              "title": "Polestar"
+            },
+            {
+              "id": "284",
+              "title": "Pontiac"
+            },
+            {
+              "id": "282",
+              "title": "Porsche"
+            },
+            {
+              "id": "43534",
+              "title": "RAM"
+            },
+            {
+              "id": "23870",
+              "title": "Ravon"
+            },
+            {
+              "id": "8",
+              "title": "Renault"
+            },
+            {
+              "id": "27737",
+              "title": "Renault Samsung"
+            },
+            {
+              "id": "42104",
+              "title": "Riddara"
+            },
+            {
+              "id": "39472",
+              "title": "Rivian"
+            },
+            {
+              "id": "24729",
+              "title": "Roewe"
+            },
+            {
+              "id": "266",
+              "title": "Rolls-Royce"
+            },
+            {
+              "id": "62",
+              "title": "Rover"
+            },
+            {
+              "id": "344",
+              "title": "Saab"
+            },
+            {
+              "id": "22895",
+              "title": "Saturn"
+            },
+            {
+              "id": "22352",
+              "title": "Scion"
+            },
+            {
+              "id": "200",
+              "title": "Seat"
+            },
+            {
+              "id": "43854",
+              "title": "Shuanghuan"
+            },
+            {
+              "id": "24732",
+              "title": "Skywell"
+            },
+            {
+              "id": "263",
+              "title": "Smart"
+            },
+            {
+              "id": "397",
+              "title": "Ssangyong"
+            },
+            {
+              "id": "121",
+              "title": "Subaru"
+            },
+            {
+              "id": "43",
+              "title": "Suzuki"
+            },
+            {
+              "id": "34794",
+              "title": "Tank"
+            },
+            {
+              "id": "883",
+              "title": "Tata"
+            },
+            {
+              "id": "17483",
+              "title": "Tesla"
+            },
+            {
+              "id": "35821",
+              "title": "Venucia"
+            },
+            {
+              "id": "43733",
+              "title": "VinFast"
+            },
+            {
+              "id": "193",
+              "title": "Volvo"
+            },
+            {
+              "id": "36707",
+              "title": "Voyah"
+            },
+            {
+              "id": "23709",
+              "title": "Weltmeister"
+            },
+            {
+              "id": "31867",
+              "title": "Wuling"
+            },
+            {
+              "id": "37323",
+              "title": "Xiaomi"
+            },
+            {
+              "id": "23680",
+              "title": "Xpeng"
+            },
+            {
+              "id": "24793",
+              "title": "Zeekr"
+            },
+            {
+              "id": "23261",
+              "title": "Zotye"
+            },
+            {
+              "id": "43725",
+              "title": "iCar"
+            },
+            {
+              "id": "219",
+              "title": "ГАЗ"
+            },
+            {
+              "id": "154",
+              "title": "Другая марка"
+            },
+            {
+              "id": "249",
+              "title": "ЗАЗ"
+            },
+            {
+              "id": "21019",
+              "title": "ЛуАЗ"
+            },
+            {
+              "id": "59",
+              "title": "Москвич / Иж"
+            },
+            {
+              "id": "410",
+              "title": "УАЗ"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "21",
+          "title": "Модель",
+          "depends_on": "20",
+          "required": true,
+          "options": null,
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "2095",
+          "title": "Поколение",
+          "depends_on": "21",
+          "required": true,
+          "options": null,
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "775",
+          "title": "Регистрация",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "18594",
+              "title": "Другое"
+            },
+            {
+              "id": "20474",
+              "title": "Не растаможен"
+            },
+            {
+              "id": "18593",
+              "title": "Приднестровье"
+            },
+            {
+              "id": "20473",
+              "title": "Растаможен"
+            },
+            {
+              "id": "18592",
+              "title": "Республика Молдова"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "593",
+          "title": "Состояние",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "18672",
+              "title": "Новый"
+            },
+            {
+              "id": "18668",
+              "title": "С пробегом"
+            },
+            {
+              "id": "23242",
+              "title": "Требует ремонта"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "1761",
+          "title": "Наличие",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "29671",
+              "title": "В пути"
+            },
+            {
+              "id": "29670",
+              "title": "На месте"
+            },
+            {
+              "id": "29672",
+              "title": "Под заказ"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "1763",
+          "title": "Происхождение автомобиля",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "33044",
+              "title": "Другое"
+            },
+            {
+              "id": "29677",
+              "title": "Еврозона"
+            },
+            {
+              "id": "33042",
+              "title": "Китай"
+            },
+            {
+              "id": "33043",
+              "title": "Корея"
+            },
+            {
+              "id": "29678",
+              "title": "США"
+            },
+            {
+              "id": "42430",
+              "title": "Япония"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "795",
+          "title": "Автор объявления",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "18895",
+              "title": "Частное лицо"
+            },
+            {
+              "id": "23241",
+              "title": "Автодилер"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "2512",
+          "title": "VIN-код",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "textbox_text"
+        }
+      ]
+    },
+    {
+      "title": "Свойства",
+      "features": [
+        {
+          "id": "19",
+          "title": "Год выпуска",
+          "depends_on": null,
+          "required": true,
+          "options": null,
+          "units": null,
+          "type": "textbox_numeric"
+        },
+        {
+          "id": "1196",
+          "title": "Руль",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "21979",
+              "title": "Левый"
+            },
+            {
+              "id": "21978",
+              "title": "Правый"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "846",
+          "title": "Количество мест",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "19117",
+              "title": "2"
+            },
+            {
+              "id": "19123",
+              "title": "3"
+            },
+            {
+              "id": "19007",
+              "title": "3-4"
+            },
+            {
+              "id": "19118",
+              "title": "4"
+            },
+            {
+              "id": "19119",
+              "title": "5"
+            },
+            {
+              "id": "19121",
+              "title": "6"
+            },
+            {
+              "id": "19120",
+              "title": "7"
+            },
+            {
+              "id": "19122",
+              "title": "8"
+            },
+            {
+              "id": "24583",
+              "title": "9"
+            },
+            {
+              "id": "43783",
+              "title": "10"
+            },
+            {
+              "id": "43782",
+              "title": "11"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "102",
+          "title": "Тип кузова",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "18",
+              "title": "Внедорожник"
+            },
+            {
+              "id": "156",
+              "title": "Кабриолет"
+            },
+            {
+              "id": "68",
+              "title": "Комби"
+            },
+            {
+              "id": "74",
+              "title": "Кроссовер"
+            },
+            {
+              "id": "96",
+              "title": "Купе"
+            },
+            {
+              "id": "53",
+              "title": "Микровэн"
+            },
+            {
+              "id": "49",
+              "title": "Минивэн"
+            },
+            {
+              "id": "61",
+              "title": "Пикап"
+            },
+            {
+              "id": "265",
+              "title": "Родстер"
+            },
+            {
+              "id": "6",
+              "title": "Седан"
+            },
+            {
+              "id": "27",
+              "title": "Универсал"
+            },
+            {
+              "id": "97",
+              "title": "Фургон"
+            },
+            {
+              "id": "11",
+              "title": "Хетчбэк"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "851",
+          "title": "Количество дверей",
+          "depends_on": null,
+          "required": false,
+          "options": [
+            {
+              "id": "36574",
+              "title": "1"
+            },
+            {
+              "id": "19083",
+              "title": "2"
+            },
+            {
+              "id": "19084",
+              "title": "3"
+            },
+            {
+              "id": "19085",
+              "title": "4"
+            },
+            {
+              "id": "19086",
+              "title": "5"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "104",
+          "title": "Пробег",
+          "depends_on": null,
+          "required": true,
+          "options": null,
+          "units": [
+            "km",
+            "mi"
+          ],
+          "type": "textbox_numeric_measurement"
+        },
+        {
+          "id": "2553",
+          "title": "Двигатель",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "43670",
+              "title": "Электрический"
+            },
+            {
+              "id": "43671",
+              "title": "0.7 л"
+            },
+            {
+              "id": "43672",
+              "title": "0.8 л"
+            },
+            {
+              "id": "43673",
+              "title": "0.9 л"
+            },
+            {
+              "id": "43674",
+              "title": "1.0 л"
+            },
+            {
+              "id": "43675",
+              "title": "1.1 л"
+            },
+            {
+              "id": "43676",
+              "title": "1.2 л"
+            },
+            {
+              "id": "43677",
+              "title": "1.3 л"
+            },
+            {
+              "id": "43678",
+              "title": "1.4 л"
+            },
+            {
+              "id": "43679",
+              "title": "1.5 л"
+            },
+            {
+              "id": "43680",
+              "title": "1.6 л"
+            },
+            {
+              "id": "43681",
+              "title": "1.7 л"
+            },
+            {
+              "id": "43682",
+              "title": "1.8 л"
+            },
+            {
+              "id": "43683",
+              "title": "1.9 л"
+            },
+            {
+              "id": "43684",
+              "title": "2.0 л"
+            },
+            {
+              "id": "43685",
+              "title": "2.1 л"
+            },
+            {
+              "id": "43686",
+              "title": "2.2 л"
+            },
+            {
+              "id": "43687",
+              "title": "2.3 л"
+            },
+            {
+              "id": "43688",
+              "title": "2.4 л"
+            },
+            {
+              "id": "43689",
+              "title": "2.5 л"
+            },
+            {
+              "id": "43690",
+              "title": "2.6 л"
+            },
+            {
+              "id": "43691",
+              "title": "2.7 л"
+            },
+            {
+              "id": "43692",
+              "title": "2.8 л"
+            },
+            {
+              "id": "43693",
+              "title": "2.9 л"
+            },
+            {
+              "id": "43694",
+              "title": "3.0 л"
+            },
+            {
+              "id": "43695",
+              "title": "3.1 л"
+            },
+            {
+              "id": "43696",
+              "title": "3.2 л"
+            },
+            {
+              "id": "43697",
+              "title": "3.3 л"
+            },
+            {
+              "id": "43698",
+              "title": "3.4 л"
+            },
+            {
+              "id": "43699",
+              "title": "3.5 л"
+            },
+            {
+              "id": "43700",
+              "title": "3.6 л"
+            },
+            {
+              "id": "43701",
+              "title": "3.8 л"
+            },
+            {
+              "id": "43702",
+              "title": "3.9 л"
+            },
+            {
+              "id": "43703",
+              "title": "4.0 л"
+            },
+            {
+              "id": "43704",
+              "title": "4.2 л"
+            },
+            {
+              "id": "43705",
+              "title": "4.3 л"
+            },
+            {
+              "id": "43706",
+              "title": "4.4 л"
+            },
+            {
+              "id": "43707",
+              "title": "4.5 л"
+            },
+            {
+              "id": "43708",
+              "title": "4.6 л"
+            },
+            {
+              "id": "43709",
+              "title": "4.7 л"
+            },
+            {
+              "id": "43710",
+              "title": "4.8 л"
+            },
+            {
+              "id": "43711",
+              "title": "5.0 л"
+            },
+            {
+              "id": "43712",
+              "title": "5.2 л"
+            },
+            {
+              "id": "43713",
+              "title": "5.3 л"
+            },
+            {
+              "id": "43714",
+              "title": "5.4 л"
+            },
+            {
+              "id": "43715",
+              "title": "5.5 л"
+            },
+            {
+              "id": "43716",
+              "title": "5.6 л"
+            },
+            {
+              "id": "43717",
+              "title": "5.7 л"
+            },
+            {
+              "id": "43718",
+              "title": "5.8 л"
+            },
+            {
+              "id": "43719",
+              "title": "5.9 л"
+            },
+            {
+              "id": "43720",
+              "title": "6.0 л"
+            },
+            {
+              "id": "43721",
+              "title": "6.2 л"
+            },
+            {
+              "id": "43722",
+              "title": "6.4 л"
+            },
+            {
+              "id": "43723",
+              "title": "6.6 л"
+            },
+            {
+              "id": "43724",
+              "title": "6.7 л"
+            },
+            {
+              "id": "43763",
+              "title": "8.0 л"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "107",
+          "title": "Мощность (л.с.)",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": [
+            "hp"
+          ],
+          "type": "textbox_numeric_measurement"
+        },
+        {
+          "id": "151",
+          "title": "Тип топлива",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "10",
+              "title": "Бензин"
+            },
+            {
+              "id": "24",
+              "title": "Дизель"
+            },
+            {
+              "id": "3",
+              "title": "Газ / Бензин (пропан)"
+            },
+            {
+              "id": "159",
+              "title": "Газ / Бензин (метан)"
+            },
+            {
+              "id": "161",
+              "title": "Гибрид"
+            },
+            {
+              "id": "12617",
+              "title": "Электричество"
+            },
+            {
+              "id": "22987",
+              "title": "Плагин-гибрид (бензин)"
+            },
+            {
+              "id": "43422",
+              "title": "Плагин-гибрид (дизель)"
+            },
+            {
+              "id": "43424",
+              "title": "Мягкий гибрид (бензин)"
+            },
+            {
+              "id": "43423",
+              "title": "Мягкий гибрид (дизель)"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "101",
+          "title": "КПП",
+          "depends_on": null,
+          "required": false,
+          "options": [
+            {
+              "id": "16",
+              "title": "Автомат"
+            },
+            {
+              "id": "1051",
+              "title": "Вариатор"
+            },
+            {
+              "id": "4",
+              "title": "Механика"
+            },
+            {
+              "id": "29422",
+              "title": "Полуавтоматическая"
+            },
+            {
+              "id": "1054",
+              "title": "Робот"
+            },
+            {
+              "id": "1052",
+              "title": "Типтроник"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "108",
+          "title": "Привод",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "25",
+              "title": "Задний"
+            },
+            {
+              "id": "5",
+              "title": "Передний"
+            },
+            {
+              "id": "17",
+              "title": "4х4"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "17",
+          "title": "Цвет",
+          "depends_on": null,
+          "required": false,
+          "options": [
+            {
+              "id": "87",
+              "title": "Бежевый"
+            },
+            {
+              "id": "19",
+              "title": "Белый"
+            },
+            {
+              "id": "65",
+              "title": "Бордовый"
+            },
+            {
+              "id": "31",
+              "title": "Голубой"
+            },
+            {
+              "id": "179",
+              "title": "Желтый"
+            },
+            {
+              "id": "13",
+              "title": "Зелёный"
+            },
+            {
+              "id": "72",
+              "title": "Золотой"
+            },
+            {
+              "id": "208",
+              "title": "Коричневый"
+            },
+            {
+              "id": "38",
+              "title": "Красный"
+            },
+            {
+              "id": "309",
+              "title": "Малины"
+            },
+            {
+              "id": "334",
+              "title": "Оранжевый"
+            },
+            {
+              "id": "554",
+              "title": "Розовый"
+            },
+            {
+              "id": "176",
+              "title": "Салатовый"
+            },
+            {
+              "id": "56",
+              "title": "Серебряный"
+            },
+            {
+              "id": "50",
+              "title": "Серый"
+            },
+            {
+              "id": "40",
+              "title": "Синий"
+            },
+            {
+              "id": "12",
+              "title": "Тёмно-зелёный"
+            },
+            {
+              "id": "93",
+              "title": "Фиолетовый"
+            },
+            {
+              "id": "79",
+              "title": "Хамелеон"
+            },
+            {
+              "id": "7",
+              "title": "Черный"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        }
+      ]
+    },
+    {
+      "title": "Спецификации электромобилей",
+      "features": [
+        {
+          "id": "2513",
+          "title": "Autonomie ",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": [
+            "km"
+          ],
+          "type": "textbox_numeric_measurement"
+        },
+        {
+          "id": "2554",
+          "title": "Ёмкость батареи",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": [
+            "kWh"
+          ],
+          "type": "textbox_numeric_measurement"
+        },
+        {
+          "id": "2555",
+          "title": "Быстрая зарядка 10–80%",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": [
+            "min"
+          ],
+          "type": "textbox_numeric_measurement"
+        }
+      ]
+    },
+    {
+      "title": "Цена и регион",
+      "features": [
+        {
+          "id": "7",
+          "title": "Регион",
+          "depends_on": null,
+          "required": true,
+          "options": [
+            {
+              "id": "17475",
+              "title": "Днестровск"
+            },
+            {
+              "id": "12912",
+              "title": "Бельцы мун."
+            },
+            {
+              "id": "12911",
+              "title": "Флорешты"
+            },
+            {
+              "id": "12910",
+              "title": "Страшены"
+            },
+            {
+              "id": "12909",
+              "title": "Оргеев"
+            },
+            {
+              "id": "12908",
+              "title": "Кагул"
+            },
+            {
+              "id": "12907",
+              "title": "Калараш"
+            },
+            {
+              "id": "12906",
+              "title": "Сынжерей"
+            },
+            {
+              "id": "12905",
+              "title": "Новые Анены"
+            },
+            {
+              "id": "12904",
+              "title": "Глодяны"
+            },
+            {
+              "id": "12903",
+              "title": "Каушаны"
+            },
+            {
+              "id": "12902",
+              "title": "Окница"
+            },
+            {
+              "id": "12901",
+              "title": "Бессарабка"
+            },
+            {
+              "id": "12900",
+              "title": "Кишинёв мун."
+            },
+            {
+              "id": "12899",
+              "title": "Сороки"
+            },
+            {
+              "id": "12898",
+              "title": "Бричаны"
+            },
+            {
+              "id": "12897",
+              "title": "Рышканы"
+            },
+            {
+              "id": "12896",
+              "title": "Дондюшаны"
+            },
+            {
+              "id": "12895",
+              "title": "Единцы"
+            },
+            {
+              "id": "12894",
+              "title": "Тараклия"
+            },
+            {
+              "id": "12893",
+              "title": "Дрокия"
+            },
+            {
+              "id": "12892",
+              "title": "Теленешты"
+            },
+            {
+              "id": "12891",
+              "title": "Резина"
+            },
+            {
+              "id": "12890",
+              "title": "Кантемир"
+            },
+            {
+              "id": "12889",
+              "title": "Чимишлия"
+            },
+            {
+              "id": "12888",
+              "title": "Криуляны"
+            },
+            {
+              "id": "12887",
+              "title": "Фалешты"
+            },
+            {
+              "id": "12886",
+              "title": "Яловены"
+            },
+            {
+              "id": "12885",
+              "title": "Тирасполь мун."
+            },
+            {
+              "id": "12884",
+              "title": "Слободзея"
+            },
+            {
+              "id": "12883",
+              "title": "Рыбница"
+            },
+            {
+              "id": "12882",
+              "title": "Бендеры мун."
+            },
+            {
+              "id": "12881",
+              "title": "Леова"
+            },
+            {
+              "id": "12880",
+              "title": "Шолданешты"
+            },
+            {
+              "id": "12879",
+              "title": "Дубоссары"
+            },
+            {
+              "id": "12878",
+              "title": "Вулканешты"
+            },
+            {
+              "id": "12877",
+              "title": "Ниспорены"
+            },
+            {
+              "id": "12876",
+              "title": "Хынчешты"
+            },
+            {
+              "id": "12875",
+              "title": "Комрат"
+            },
+            {
+              "id": "12874",
+              "title": "Каменка"
+            },
+            {
+              "id": "12873",
+              "title": "Григориополь"
+            },
+            {
+              "id": "12872",
+              "title": "Штефан-Водэ"
+            },
+            {
+              "id": "12871",
+              "title": "Чадыр-Лунга"
+            },
+            {
+              "id": "12870",
+              "title": "Унгены"
+            }
+          ],
+          "units": null,
+          "type": "drop_down_options"
+        },
+        {
+          "id": "2",
+          "title": "Цена",
+          "depends_on": null,
+          "required": true,
+          "options": null,
+          "units": [
+            "eur",
+            "usd",
+            "mdl"
+          ],
+          "type": "textbox_numeric_measurement"
+        },
+        {
+          "id": "1640",
+          "title": "Старая цена",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "textbox_numeric"
+        }
+      ]
+    },
+    {
+      "title": "Заголовок и текст",
+      "features": [
+        {
+          "id": "13",
+          "title": "body",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "textarea_text"
+        },
+        {
+          "id": "1404",
+          "title": "Теги",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "textbox_text"
+        }
+      ]
+    },
+    {
+      "title": "Безопасность",
+      "features": [
+        {
+          "id": "109",
+          "title": "Антиблокировочная тормозная система (ABS)",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "115",
+          "title": "Шторки безопасности",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "110",
+          "title": "Антипробуксовочная система (TCS, ASR, TRC)",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "114",
+          "title": "Боковые подушки безопасности",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "116",
+          "title": "Датчик парковки",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "1639",
+          "title": "Система кругового обзора",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "113",
+          "title": "Подушка безопасности пассажира",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "111",
+          "title": "Система стабилизации (ESP, DSC, VDC, ESC)",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "112",
+          "title": "Подушка безопасности водителя",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "119",
+          "title": "Омыватель фар",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "118",
+          "title": "Датчик света",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "120",
+          "title": "Противоугонное устройство",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "127",
+          "title": "Летние шины",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "126",
+          "title": "Легкосплавные колесные диски",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "121",
+          "title": "Противоугонная сигнализация",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "124",
+          "title": "Многофункциональный руль",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "125",
+          "title": "Стальные колесные диски",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "128",
+          "title": "Зимние шины",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "123",
+          "title": "Противотуманные фары",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "129",
+          "title": "Всесезонные шины",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "117",
+          "title": "Датчик дождя",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "1638",
+          "title": "Камера заднего вида",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "122",
+          "title": "Ксеноновые фары",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "1757",
+          "title": "Светодиодные фары",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "1758",
+          "title": "Лазерные фары",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "1766",
+          "title": "Фаркоп",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "2201",
+          "title": "Крепления для детских сидений (Isofix)",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "2200",
+          "title": "Крепление для якорного ремня (Top Tether)",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        }
+      ]
+    },
+    {
+      "title": "Комфорт",
+      "features": [
+        {
+          "id": "130",
+          "title": "Кондиционер",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "131",
+          "title": "Климат-контроль",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "132",
+          "title": "Усилитель руля",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "133",
+          "title": "Регулируемая по высоте рулевая колонка",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "134",
+          "title": "Регулируемая по вылету рулевая колонка",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "135",
+          "title": "Люк",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "2523",
+          "title": "Панорамная крыша",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "136",
+          "title": "Электростеклоподъемники",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "137",
+          "title": "Электрорегулировка боковых зеркал",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "138",
+          "title": "Электрорегулировка водительского сиденья",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "139",
+          "title": "Электрорегулировка пассажирского сиденья",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "140",
+          "title": "Подогрев передних сидений",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "141",
+          "title": "Подогрев боковых зеркал",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "142",
+          "title": "Центральный замок",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "143",
+          "title": "Круиз-контроль",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "144",
+          "title": "Аудиосистема, Bluetooth",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "145",
+          "title": "Кожаный салон",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "147",
+          "title": "Обивка салона ткань",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "2522",
+          "title": "Вентиляция сидений",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "148",
+          "title": "Бортовой компьютер",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "149",
+          "title": "Навигационная система, TV, DVD",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        },
+        {
+          "id": "150",
+          "title": "Тонированные стекла",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "check_box"
+        }
+      ]
+    },
+    {
+      "title": "Медиа",
+      "features": [
+        {
+          "id": "14",
+          "title": "Фото",
+          "depends_on": null,
+          "required": true,
+          "options": null,
+          "units": null,
+          "type": "upload_images"
+        },
+        {
+          "id": "15",
+          "title": "Видео",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "upload_videos"
+        }
+      ]
+    },
+    {
+      "title": "Контакты",
+      "features": [
+        {
+          "id": "16",
+          "title": "Контакты",
+          "depends_on": null,
+          "required": false,
+          "options": null,
+          "units": null,
+          "type": "contacts"
+        }
+      ]
+    }
+  ]
+}

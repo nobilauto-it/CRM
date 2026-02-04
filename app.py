@@ -15,7 +15,7 @@ import json
 import requests
 import psycopg2
 from psycopg2.extras import execute_values, Json
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 # -----------------------------
 # CONFIG
@@ -266,13 +266,12 @@ app.include_router(data_router)
 from processes_deals_api import router as processes_deals_router
 app.include_router(processes_deals_router)
 
-# Import entity-fields API router
-from entity_fields_api import router as entity_fields_router
-app.include_router(entity_fields_router)
+# Import entity-meta-fields API router
+from entity_meta_fields_api import router as entity_meta_fields_router
+app.include_router(entity_meta_fields_router)
 
-# Import entity-data API router
-from entity_data_api import router as entity_data_router
-app.include_router(entity_data_router)
+from entity_meta_data_api import router as entity_meta_data_router
+app.include_router(entity_meta_data_router)
 
 # -----------------------------
 # Bitrix REST client
@@ -410,6 +409,44 @@ def ensure_meta_tables(conn):
             updated_at TIMESTAMPTZ DEFAULT now()
         );
         """)
+
+        # Кэш пользователей Bitrix (id -> name) для отображения в API без вызова Bitrix
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS b24_users (
+            id BIGINT PRIMARY KEY,
+            name TEXT,
+            updated_at TIMESTAMPTZ DEFAULT now()
+        );
+        """)
+
+        # Воронки сделок (категории): id — ID категории, name — название
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS b24_deal_categories (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            updated_at TIMESTAMPTZ DEFAULT now()
+        );
+        """)
+        # Стадии сделок: stage_id (например C12:NEW), category_id — воронка, name — название стадии
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS b24_deal_stages (
+            stage_id TEXT PRIMARY KEY,
+            category_id TEXT,
+            name TEXT,
+            updated_at TIMESTAMPTZ DEFAULT now()
+        );
+        """)
+        # Enum/списочные значения полей (в т.ч. UF_CRM_*): по entity_key + b24_field + value_id — value_title
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS b24_field_enum (
+            entity_key TEXT NOT NULL,
+            b24_field TEXT NOT NULL,
+            value_id TEXT NOT NULL,
+            value_title TEXT NOT NULL,
+            updated_at TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (entity_key, b24_field, value_id)
+        );
+        """)
     conn.commit()
 
 def get_sync_cursor(conn, entity_key: str) -> int:
@@ -462,6 +499,24 @@ def set_sync_cursor(conn, entity_key: str, cursor: int):
                 updated_at = now()
         """, (entity_key, str(int(cursor))))
     conn.commit()
+
+
+def _upsert_b24_user(conn, user_id: int, name: Optional[str]) -> None:
+    """Сохранить/обновить имя пользователя в b24_users (для API без вызова Bitrix)."""
+    if name is None or not str(name).strip():
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO b24_users (id, name, updated_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (id) DO UPDATE
+                SET name = EXCLUDED.name, updated_at = now()
+            """, (int(user_id), str(name).strip()))
+        conn.commit()
+    except Exception as e:
+        print(f"WARNING: _upsert_b24_user({user_id}): {e}", file=sys.stderr, flush=True)
+
 
 # -----------------------------
 # Naming + type mapping
@@ -579,8 +634,9 @@ def upsert_meta_fields(conn, entity_key: str, fields: Dict[str, Any], colmap: Di
     def pick_title(meta: Dict[str, Any]) -> Optional[str]:
         for k in ("title", "formLabel", "listLabel", "filterLabel", "label", "name"):
             v = meta.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
+            s = _label_to_string(v)
+            if s:
+                return s
         return None
 
     rows = []
@@ -783,6 +839,527 @@ def sync_sources_classifier(conn):
         print(f"ERROR: sync_sources_classifier: Failed to sync sources from Bitrix API: {e}", file=sys.stderr, flush=True)
         traceback.print_exc()
         raise
+
+
+def sync_deal_categories(conn) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """Заполняет b24_deal_categories. Возвращает (rows, debug_notes)."""
+    rows: List[Tuple[str, str]] = []
+    debug_notes: List[str] = []
+    for method, params in [
+        ("crm.category.list", {"entityTypeId": 2}),
+        ("crm.category.list", {}),
+        ("crm.dealcategory.list", {}),
+    ]:
+        try:
+            data = b24.call(method, params)
+            result = data.get("result")
+            if not result:
+                debug_notes.append(f"{method}: result empty")
+                continue
+            raw = result.get("categories") or result.get("items") if isinstance(result, dict) else result
+            if isinstance(raw, dict):
+                items = list(raw.values())
+            elif isinstance(raw, list):
+                items = raw
+            else:
+                items = []
+            if isinstance(result, dict) and not items and result.get("result") is not None:
+                r2 = result.get("result")
+                items = list(r2.values()) if isinstance(r2, dict) else (r2 if isinstance(r2, list) else [])
+            debug_notes.append(f"{method}: got {len(items)} items (first type: {type(items[0]).__name__ if items else 'n/a'})")
+            for cat in items:
+                cid = None
+                name = ""
+                if isinstance(cat, dict):
+                    cid = cat.get("id") or cat.get("ID") or cat.get("Id") or cat.get("entityTypeId") or cat.get("categoryId")
+                    name = cat.get("name") or cat.get("NAME") or cat.get("title") or cat.get("TITLE") or ""
+                elif cat is not None and not isinstance(cat, (dict, list)):
+                    cid = cat
+                    name = str(cat)
+                if cid is None:
+                    continue
+                rows.append((str(cid), (name or str(cid)).strip()))
+            if rows:
+                break
+        except Exception as e:
+            debug_notes.append(f"{method}: {type(e).__name__}: {e}")
+            print(f"DEBUG: sync_deal_categories {method}: {e}", file=sys.stderr, flush=True)
+            continue
+    if rows:
+        # Убираем дубликаты по id (ON CONFLICT не допускает два обновления одной строки в одной команде)
+        seen_cat: Dict[str, Tuple[str, str]] = {}
+        for cid, name in rows:
+            seen_cat[cid] = (cid, name)
+        rows = list(seen_cat.values())
+        try:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO b24_deal_categories (id, name)
+                    VALUES %s
+                    ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+                    """,
+                    rows,
+                    page_size=100,
+                )
+            conn.commit()
+            print(f"INFO: sync_deal_categories: synced {len(rows)} categories", file=sys.stderr, flush=True)
+        except Exception as e:
+            conn.rollback()
+            debug_notes.append(f"insert error: {e}")
+            print(f"WARNING: sync_deal_categories insert: {e}", file=sys.stderr, flush=True)
+    else:
+        debug_notes.append("no categories parsed (check result.categories / dealcategory list format)")
+    return rows, debug_notes
+
+
+def sync_sources_from_status(conn) -> int:
+    """
+    Синхронизирует стандартные источники (SOURCE) из crm.status.list ENTITY_ID=SOURCE
+    в b24_classifier_sources и в b24_field_enum (deal/lead source_id). Так значение «Источник»
+    в сделках/лидах будет показывать название вместо кода (UC_Z315Y5 и т.д.).
+    """
+    try:
+        data = b24.call("crm.status.list", {"filter": {"ENTITY_ID": "SOURCE"}})
+        result = data.get("result")
+        if not result:
+            return 0
+        items = result if isinstance(result, list) else (
+            result.get("result") or result.get("statuses") or result.get("items")
+            or result.get("SOURCE") or result.get("source") or []
+        )
+        if not isinstance(items, list) or not items:
+            return 0
+        rows: List[Tuple[str, str]] = []
+        for st in items:
+            sid = None
+            name = ""
+            if isinstance(st, dict):
+                sid = (
+                    st.get("STATUS_ID") or st.get("statusId") or st.get("id") or st.get("ID")
+                    or st.get("VALUE") or st.get("value") or st.get("SYMBOL_CODE")
+                )
+                name = st.get("NAME") or st.get("name") or st.get("title") or st.get("TITLE") or ""
+            if sid is None:
+                continue
+            sid_str = str(sid).strip()
+            name_str = (name or sid_str).strip()
+            rows.append((sid_str, name_str))
+        if not rows:
+            return 0
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO b24_classifier_sources (source_id, source_name)
+                VALUES %s
+                ON CONFLICT (source_id) DO UPDATE SET source_name = EXCLUDED.source_name, updated_at = now()
+                """,
+                rows,
+                page_size=200,
+            )
+            enum_rows: List[Tuple[str, str, str, str]] = []
+            for sid_str, name_str in rows:
+                enum_rows.append(("deal", "source_id", sid_str, name_str))
+                enum_rows.append(("lead", "source_id", sid_str, name_str))
+            if enum_rows:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO b24_field_enum (entity_key, b24_field, value_id, value_title)
+                    VALUES %s
+                    ON CONFLICT (entity_key, b24_field, value_id) DO UPDATE SET value_title = EXCLUDED.value_title, updated_at = now()
+                    """,
+                    enum_rows,
+                    page_size=200,
+                )
+        conn.commit()
+        print(f"INFO: sync_sources_from_status: synced {len(rows)} standard SOURCE statuses", file=sys.stderr, flush=True)
+        return len(rows)
+    except Exception as e:
+        conn.rollback()
+        print(f"WARNING: sync_sources_from_status: {e}", file=sys.stderr, flush=True)
+        return 0
+
+
+def sync_deal_stages(conn) -> Tuple[List[Tuple[str, str, str]], List[str]]:
+    """Заполняет b24_deal_stages из crm.status.list. Возвращает (rows, debug_notes)."""
+    debug_notes: List[str] = []
+    entity_ids = ["DEAL_STAGE"]
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM b24_deal_categories ORDER BY id")
+        for row in cur.fetchall() or []:
+            entity_ids.append(f"DEAL_STAGE_{row[0]}")
+    if len(entity_ids) == 1:
+        entity_ids = ["DEAL_STAGE", "DEAL_STAGE_0", "DEAL_STAGE_1", "DEAL_STAGE_2", "DEAL_STAGE_12", "DEAL_STAGE_20"]
+    rows: List[Tuple[str, str, str]] = []
+    for entity_id in entity_ids:
+        try:
+            data = b24.call("crm.status.list", {"filter": {"ENTITY_ID": entity_id}})
+            result = data.get("result")
+            if not result:
+                continue
+            items = result if isinstance(result, list) else (result.get("result") or result.get("statuses") or result.get("items") or [])
+            if not isinstance(items, list):
+                items = []
+            if items and len(debug_notes) == 0:
+                debug_notes.append(f"status.list {entity_id}: {len(items)} items, first type={type(items[0]).__name__}")
+            cat_id = entity_id.replace("DEAL_STAGE_", "") if entity_id != "DEAL_STAGE" else "0"
+            for st in items:
+                sid = None
+                name = ""
+                if isinstance(st, dict):
+                    sid = st.get("STATUS_ID") or st.get("statusId") or st.get("id") or st.get("ID")
+                    name = st.get("NAME") or st.get("name") or st.get("title") or st.get("TITLE") or ""
+                elif st is not None and not isinstance(st, (dict, list)):
+                    sid = st
+                    name = str(st)
+                if sid is None:
+                    continue
+                rows.append((str(sid), cat_id, (name or str(sid)).strip()))
+        except Exception as e:
+            debug_notes.append(f"status.list {entity_id}: {e}")
+            print(f"WARNING: sync_deal_stages {entity_id}: {e}", file=sys.stderr, flush=True)
+    if rows:
+        try:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO b24_deal_stages (stage_id, category_id, name)
+                    VALUES %s
+                    ON CONFLICT (stage_id) DO UPDATE SET category_id = EXCLUDED.category_id, name = EXCLUDED.name, updated_at = now()
+                    """,
+                    rows,
+                    page_size=200,
+                )
+            conn.commit()
+            print(f"INFO: sync_deal_stages: synced {len(rows)} stages", file=sys.stderr, flush=True)
+        except Exception as e:
+            conn.rollback()
+            debug_notes.append(f"stages insert: {e}")
+            print(f"WARNING: sync_deal_stages insert: {e}", file=sys.stderr, flush=True)
+    return rows, debug_notes
+
+
+def sync_deal_types(conn) -> None:
+    """Заполняет b24_field_enum типами сделок (TYPE_ID) из crm.status.list ENTITY_ID=DEAL_TYPE."""
+    rows: List[Tuple[str, str, str, str]] = []
+    for entity_id in ("DEAL_TYPE", "TYPE"):
+        try:
+            data = b24.call("crm.status.list", {"filter": {"ENTITY_ID": entity_id}})
+            result = data.get("result")
+            if not result:
+                continue
+            items: List[Any] = []
+            if isinstance(result, list):
+                items = result
+            elif isinstance(result, dict):
+                items = result.get("result") or result.get("statuses") or result.get("items") or []
+                if not isinstance(items, list):
+                    items = list(result.values()) if result else []
+                if not items and result:
+                    # формат { "UC_XXX": {"NAME": "..."}, ... }
+                    for sid, st in result.items():
+                        if isinstance(st, dict):
+                            name = st.get("NAME") or st.get("name") or st.get("title") or st.get("TITLE") or ""
+                            items.append({"STATUS_ID": sid, "NAME": name or sid})
+                        elif st is not None and not isinstance(st, (dict, list)):
+                            items.append({"STATUS_ID": sid, "NAME": str(st)})
+            if not isinstance(items, list):
+                items = []
+            for st in items:
+                sid = None
+                name = ""
+                if isinstance(st, dict):
+                    sid = st.get("STATUS_ID") or st.get("statusId") or st.get("id") or st.get("ID")
+                    name = st.get("NAME") or st.get("name") or st.get("title") or st.get("TITLE") or ""
+                elif st is not None and not isinstance(st, (dict, list)):
+                    sid = st
+                    name = str(st)
+                if sid is None:
+                    continue
+                rows.append(("deal", "TYPE_ID", str(sid), (name or str(sid)).strip()))
+            if rows:
+                break
+        except Exception as e:
+            print(f"DEBUG: sync_deal_types {entity_id}: {e}", file=sys.stderr, flush=True)
+            continue
+    if not rows:
+        return
+    try:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO b24_field_enum (entity_key, b24_field, value_id, value_title)
+                VALUES %s
+                ON CONFLICT (entity_key, b24_field, value_id) DO UPDATE SET value_title = EXCLUDED.value_title, updated_at = now()
+                """,
+                rows,
+                page_size=100,
+            )
+        conn.commit()
+        print(f"INFO: sync_deal_types: synced {len(rows)} deal types", file=sys.stderr, flush=True)
+    except Exception as e:
+        conn.rollback()
+        print(f"WARNING: sync_deal_types: {e}", file=sys.stderr, flush=True)
+
+
+def _userfield_items_to_enum_rows(entity_key: str, field_name: str, items: List[Any]) -> List[Tuple[str, str, str, str]]:
+    rows = []
+    for opt in items or []:
+        if not isinstance(opt, dict):
+            continue
+        vid = opt.get("ID") or opt.get("id") or opt.get("VALUE") or opt.get("value")
+        title = opt.get("VALUE") or opt.get("value") or opt.get("NAME") or opt.get("name") or opt.get("TITLE") or opt.get("title")
+        if vid is None or (isinstance(vid, str) and not vid.strip()):
+            continue
+        if title is None:
+            title = str(vid)
+        rows.append((entity_key, field_name, str(vid).strip(), str(title).strip()))
+    return rows
+
+
+def sync_field_enums(conn, entity_key: str) -> Tuple[int, List[str]]:
+    """Синхронизирует enum/списочные значения полей в b24_field_enum. Возвращает (n_inserted, debug_notes)."""
+    debug_notes: List[str] = []
+    if entity_key == "deal":
+        method = "crm.deal.userfield.list"
+    elif entity_key == "contact":
+        method = "crm.contact.userfield.list"
+    elif entity_key == "lead":
+        method = "crm.lead.userfield.list"
+    else:
+        return 0, []
+    try:
+        data = b24.call(method, {})
+        result = data.get("result")
+        if not result:
+            debug_notes.append(f"{entity_key} userfield.list: result empty")
+            return 0, debug_notes
+        field_list: List[Tuple[str, Dict[str, Any]]] = []
+        if isinstance(result, list):
+            for uf in result:
+                if isinstance(uf, dict):
+                    fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                    if fn:
+                        field_list.append((fn, uf))
+            debug_notes.append(f"{entity_key}: result is list, {len(field_list)} fields")
+        elif isinstance(result, dict):
+            if result.get("userFields") and isinstance(result["userFields"], list):
+                for uf in result["userFields"]:
+                    if isinstance(uf, dict):
+                        fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                        if fn:
+                            field_list.append((fn, uf))
+            elif result.get("fields") and isinstance(result["fields"], dict):
+                for fn, uf in result["fields"].items():
+                    if isinstance(uf, dict) and fn:
+                        field_list.append((str(fn), uf))
+            elif result.get("fields") and isinstance(result["fields"], list):
+                for uf in result["fields"]:
+                    if isinstance(uf, dict):
+                        fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                        if fn:
+                            field_list.append((fn, uf))
+            else:
+                for fn, uf in result.items():
+                    if isinstance(uf, dict) and fn and not fn.startswith("_"):
+                        field_list.append((str(fn), uf))
+            debug_notes.append(f"{entity_key}: result is dict, {len(field_list)} fields")
+        all_rows = []
+        fields_with_items = 0
+        for field_name, uf in field_list:
+            raw_items = uf.get("items") or uf.get("values") or uf.get("ENUM") or uf.get("LIST") or uf.get("list") or []
+            if isinstance(raw_items, dict):
+                items = raw_items.get("items") or raw_items.get("values") or list(raw_items.values())
+            else:
+                items = raw_items if isinstance(raw_items, list) else []
+            if not items:
+                continue
+            fields_with_items += 1
+            all_rows.extend(_userfield_items_to_enum_rows(entity_key, field_name, items))
+        debug_notes.append(f"{entity_key}: {fields_with_items} fields with enum items, {len(all_rows)} total values")
+        if all_rows:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO b24_field_enum (entity_key, b24_field, value_id, value_title)
+                    VALUES %s
+                    ON CONFLICT (entity_key, b24_field, value_id) DO UPDATE SET value_title = EXCLUDED.value_title, updated_at = now()
+                    """,
+                    all_rows,
+                    page_size=200,
+                )
+            conn.commit()
+            print(f"INFO: sync_field_enums({entity_key}): synced {len(all_rows)} enum values", file=sys.stderr, flush=True)
+        return len(all_rows), debug_notes
+    except Exception as e:
+        conn.rollback()
+        debug_notes.append(f"{entity_key}: {type(e).__name__}: {e}")
+        print(f"WARNING: sync_field_enums({entity_key}): {e}", file=sys.stderr, flush=True)
+        return 0, debug_notes
+
+
+def _label_to_string(val: Any) -> Optional[str]:
+    """Извлекает строку из label: строка как есть, dict — берём ru/en/first."""
+    if val is None:
+        return None
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    if isinstance(val, dict):
+        for k in ("ru", "en", "de", "ua", "first"):
+            v = val.get(k) if k != "first" else (next(iter(val.values()), None) if val else None)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for v in val.values():
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return None
+
+
+def _userfield_list_to_field_titles(entity_key: str, result: Any) -> List[Tuple[str, str]]:
+    """
+    Парсит ответ crm.*.userfield.list и возвращает [(b24_field, human_title), ...].
+    «Название поля» из админки Битрикс (как на скрине) обычно приходит в listLabel / editFormLabel / formLabel.
+    """
+    field_list: List[Tuple[str, Dict[str, Any]]] = []
+    if isinstance(result, list):
+        for uf in result:
+            if isinstance(uf, dict):
+                fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                if fn:
+                    field_list.append((fn, uf))
+    elif isinstance(result, dict):
+        if result.get("userFields") and isinstance(result["userFields"], list):
+            for uf in result["userFields"]:
+                if isinstance(uf, dict):
+                    fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                    if fn:
+                        field_list.append((fn, uf))
+        elif result.get("items") and isinstance(result["items"], list):
+            for uf in result["items"]:
+                if isinstance(uf, dict):
+                    fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                    if fn:
+                        field_list.append((fn, uf))
+        elif result.get("fields") and isinstance(result["fields"], dict):
+            for fn, uf in result["fields"].items():
+                if isinstance(uf, dict) and fn:
+                    field_list.append((str(fn), uf))
+        elif result.get("fields") and isinstance(result["fields"], list):
+            for uf in result["fields"]:
+                if isinstance(uf, dict):
+                    fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                    if fn:
+                        field_list.append((fn, uf))
+        else:
+            for fn, uf in result.items():
+                if isinstance(uf, dict) and fn and not str(fn).startswith("_"):
+                    field_list.append((str(fn), uf))
+    # Ключи, в которых Битрикс может вернуть «Название поля» (как в админке: Код поля / Название поля)
+    _title_keys = (
+        "listLabel", "editFormLabel", "formLabel", "filterLabel",
+        "title", "label", "name", "fieldLabel", "displayLabel", "caption", "header",
+        "LIST_LABEL", "EDIT_FORM_LABEL", "FORM_LABEL", "TITLE", "LABEL", "NAME",
+    )
+    out: List[Tuple[str, str]] = []
+    for field_name, uf in field_list:
+        title = None
+        for k in _title_keys:
+            title = _label_to_string(uf.get(k))
+            if title:
+                break
+        if title:
+            out.append((field_name, title))
+    return out
+
+
+def _fields_response_to_title_pairs(fields_result: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Из ответа crm.*.fields извлекает [(b24_field, human_title), ...] для полей UF_CRM_*."""
+    if not isinstance(fields_result, dict):
+        return []
+    out: List[Tuple[str, str]] = []
+    for fn, meta in fields_result.items():
+        if not fn or not isinstance(meta, dict):
+            continue
+        fn_str = str(fn).strip()
+        if not (fn_str.upper().startswith("UF_CRM_") or fn_str.startswith("ufCrm")):
+            continue
+        title = None
+        for k in ("listLabel", "editFormLabel", "formLabel", "filterLabel", "title", "label", "name"):
+            title = _label_to_string(meta.get(k))
+            if title:
+                break
+        if title:
+            out.append((fn_str, title))
+    return out
+
+
+def sync_userfield_titles(conn, entity_key: str) -> int:
+    """Обновляет b24_title в b24_meta_fields из crm.*.userfield.list (или crm.*.fields) для человекочитаемых названий полей."""
+    if entity_key == "deal":
+        method = "crm.deal.userfield.list"
+        method_fallback = "crm.deal.fields"
+    elif entity_key == "contact":
+        method = "crm.contact.userfield.list"
+        method_fallback = "crm.contact.fields"
+    elif entity_key == "lead":
+        method = "crm.lead.userfield.list"
+        method_fallback = "crm.lead.fields"
+    else:
+        return 0
+    updated = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT b24_field FROM b24_meta_fields WHERE entity_key = %s",
+                (entity_key,),
+            )
+            existing = [row[0] for row in cur.fetchall() if row and row[0]]
+        upper_to_field: Dict[str, str] = {str(f).upper(): f for f in existing}
+
+        def apply_pairs(pairs: List[Tuple[str, str]]) -> int:
+            n = 0
+            with conn.cursor() as cur:
+                for api_field, title in pairs:
+                    canonical = upper_to_field.get(str(api_field).upper()) if api_field else None
+                    if not canonical:
+                        continue
+                    cur.execute("""
+                        UPDATE b24_meta_fields SET b24_title = %s, updated_at = now()
+                        WHERE entity_key = %s AND b24_field = %s
+                    """, (title, entity_key, canonical))
+                    if cur.rowcount:
+                        n += 1
+            return n
+
+        data = b24.call(method, {})
+        result = data.get("result")
+        if result:
+            pairs = _userfield_list_to_field_titles(entity_key, result)
+            if pairs:
+                updated = apply_pairs(pairs)
+        if updated == 0 and method_fallback:
+            fallback_data = b24.call(method_fallback, {})
+            fallback_result = fallback_data.get("result")
+            if isinstance(fallback_result, dict):
+                pairs = _fields_response_to_title_pairs(fallback_result)
+                if pairs:
+                    updated = apply_pairs(pairs)
+                    print(f"INFO: sync_userfield_titles({entity_key}): used {method_fallback} fallback, updated {updated}", file=sys.stderr, flush=True)
+        conn.commit()
+        if updated:
+            print(f"INFO: sync_userfield_titles({entity_key}): updated {updated} field titles", file=sys.stderr, flush=True)
+        return updated
+    except Exception as e:
+        conn.rollback()
+        print(f"WARNING: sync_userfield_titles({entity_key}): {e}", file=sys.stderr, flush=True)
+        return 0
+
 
 def load_entity_colmap(conn, entity_key: str) -> Dict[str, Dict[str, Any]]:
     with conn.cursor() as cur:
@@ -1181,7 +1758,8 @@ def sync_schema() -> Dict[str, Any]:
 
         ensure_columns(conn, deal_table, deal_columns)
         upsert_meta_fields(conn, "deal", deal_fields, deal_colmap)
-        
+        sync_userfield_titles(conn, "deal")
+
         # Синхронизируем контакты
         contact_fields = fetch_contact_fields()
         contact_entity = {"entity_key": "contact", "entity_kind": "contact", "title": "CRM Contact", "entity_type_id": None}
@@ -1203,7 +1781,8 @@ def sync_schema() -> Dict[str, Any]:
         
         ensure_columns(conn, contact_table, contact_columns)
         upsert_meta_fields(conn, "contact", contact_fields, contact_colmap)
-        
+        sync_userfield_titles(conn, "contact")
+
         # Синхронизируем лиды
         lead_fields = fetch_lead_fields()
         lead_entity = {"entity_key": "lead", "entity_kind": "lead", "title": "CRM Lead", "entity_type_id": None}
@@ -1225,8 +1804,10 @@ def sync_schema() -> Dict[str, Any]:
         
         ensure_columns(conn, lead_table, lead_columns)
         upsert_meta_fields(conn, "lead", lead_fields, lead_colmap)
-        
-        # Синхронизируем классификатор источников из enum значений поля источника сделок
+        sync_userfield_titles(conn, "lead")
+
+        # Синхронизируем классификатор источников: стандартные SOURCE + пользовательское поле Sursa
+        sync_sources_from_status(conn)
         sync_sources_classifier(conn)
 
         types = fetch_smart_process_types()
@@ -1840,9 +2421,15 @@ def background_loop():
                         flush=True
                     )
                     
-                    # Периодически (раз в час) обновляем assigned_by_name для всех сделок
+                    # Периодически (раз в FULL_UPDATE_INTERVAL_SEC) обновляем assigned_by_name и справочники
                     current_time = time.time()
                     if current_time - _last_full_update_time >= FULL_UPDATE_INTERVAL_SEC:
+                        # Справочники (воронки, стадии, enum) — подтягиваем новые значения из Bitrix
+                        try:
+                            print("INFO: background_loop: Running periodic sync reference data...", file=sys.stderr, flush=True)
+                            run_sync_reference_data()
+                        except Exception as e:
+                            print(f"WARNING: background_loop: reference data sync failed: {e}", file=sys.stderr, flush=True)
                         print("INFO: background_loop: Starting periodic update of assigned_by_name", file=sys.stderr, flush=True)
                         try:
                             conn = pg_conn()
@@ -1907,6 +2494,10 @@ def background_loop():
                                                 """, (assigned_by_name, deal_id))
                                                 conn.commit()
                                                 updated += 1
+                                            try:
+                                                _upsert_b24_user(conn, int(assigned_by_id), assigned_by_name)
+                                            except Exception:
+                                                pass
                                     
                                     print(f"INFO: background_loop: Updated {updated} deals with assigned_by_name", file=sys.stderr, flush=True)
                                 else:
@@ -1938,6 +2529,14 @@ def _initial_sync_thread():
         except Exception as e:
             print(f"WARNING: _initial_sync_thread: sync_schema() failed (will continue anyway): {e}", file=sys.stderr, flush=True)
             traceback.print_exc()
+
+        # Справочники (воронки, стадии, enum) — чтобы entity-meta-data сразу показывал названия
+        try:
+            print("INFO: _initial_sync_thread: Running sync reference data (categories, stages, field enums)...", file=sys.stderr, flush=True)
+            run_sync_reference_data()
+            print("INFO: _initial_sync_thread: Reference data sync completed", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"WARNING: _initial_sync_thread: reference data sync failed (will continue): {e}", file=sys.stderr, flush=True)
         
         # Затем синхронизируем данные с увеличенным time_budget для начальной загрузки
         initial_sync_result = sync_data(
@@ -2453,6 +3052,186 @@ def sync_sources_classifier_endpoint():
     finally:
         conn.close()
 
+
+def _debug_bitrix_calls() -> Dict[str, Any]:
+    """Пробует вызвать Bitrix API и возвращает ответы/ошибки для отладки (без записи в БД)."""
+    out: Dict[str, Any] = {"categories": {}, "stages": {}, "deal_userfields": {}}
+    # 1) Категории
+    for method, params in [("crm.category.list", {"entityTypeId": 2}), ("crm.dealcategory.list", {})]:
+        try:
+            data = b24.call(method, params)
+            err = data.get("error")
+            result = data.get("result")
+            if err:
+                out["categories"][method] = {"error": err, "error_description": data.get("error_description", "")}
+            else:
+                rtype = type(result).__name__
+                if isinstance(result, dict):
+                    keys = list(result.keys())[:20]
+                    out["categories"][method] = {"result_type": rtype, "result_keys": keys, "result_empty": not result}
+                elif isinstance(result, list):
+                    out["categories"][method] = {"result_type": rtype, "count": len(result), "result_empty": not result}
+                else:
+                    out["categories"][method] = {"result_type": rtype, "result_empty": not result}
+        except Exception as e:
+            out["categories"][method] = {"exception": str(e), "exception_type": type(e).__name__}
+    # 2) Стадии
+    try:
+        data = b24.call("crm.status.list", {"filter": {"ENTITY_ID": "DEAL_STAGE"}})
+        err = data.get("error")
+        result = data.get("result")
+        if err:
+            out["stages"] = {"error": err, "error_description": data.get("error_description", "")}
+        else:
+            rtype = type(result).__name__
+            if isinstance(result, list):
+                out["stages"] = {"result_type": rtype, "count": len(result), "result_empty": not result}
+            elif isinstance(result, dict):
+                out["stages"] = {"result_type": rtype, "result_keys": list(result.keys())[:20], "result_empty": not result}
+            else:
+                out["stages"] = {"result_type": rtype, "result_empty": not result}
+    except Exception as e:
+        out["stages"] = {"exception": str(e), "exception_type": type(e).__name__}
+    # 3) Поля сделок (userfield.list) — дамп одного поля, чтобы увидеть ключи (listLabel и т.д.)
+    try:
+        data = b24.call("crm.deal.userfield.list", {})
+        err = data.get("error")
+        result = data.get("result")
+        if err:
+            out["deal_userfields"] = {"error": err, "error_description": data.get("error_description", "")}
+        else:
+            rtype = type(result).__name__
+            sample: Dict[str, Any] = {}
+            if isinstance(result, dict):
+                keys = list(result.keys())[:30]
+                sample["result_type"] = rtype
+                sample["result_keys"] = keys
+                sample["result_empty"] = not result
+                # Полный объект одного поля (например UF_CRM_1733346976), чтобы увидеть listLabel/editFormLabel
+                for k in ("UF_CRM_1733346976", "UF_CRM_1749211409067") + tuple(keys[:2]):
+                    v = result.get(k) if isinstance(result, dict) else None
+                    if isinstance(v, dict):
+                        sample["sample_field_key"] = k
+                        sample["sample_field"] = v
+                        break
+                if not sample.get("sample_field") and result and isinstance(result, dict):
+                    first_key = next(iter(result.keys()), None)
+                    if first_key:
+                        sample["sample_field_key"] = first_key
+                        sample["sample_field"] = result.get(first_key)
+            elif isinstance(result, list) and result:
+                sample["result_type"] = rtype
+                sample["count"] = len(result)
+                sample["result_empty"] = not result
+                first = result[0] if isinstance(result[0], dict) else None
+                if first:
+                    sample["sample_field_key"] = first.get("fieldName") or first.get("FIELD_NAME") or "?"
+                    sample["sample_field"] = first
+            else:
+                sample["result_type"] = rtype
+                sample["result_empty"] = not result
+            out["deal_userfields"] = sample
+    except Exception as e:
+        out["deal_userfields"] = {"exception": str(e), "exception_type": type(e).__name__}
+    # 4) Типы сделок (DEAL_TYPE)
+    try:
+        data = b24.call("crm.status.list", {"filter": {"ENTITY_ID": "DEAL_TYPE"}})
+        err = data.get("error")
+        result = data.get("result")
+        if err:
+            out["deal_types"] = {"error": err, "error_description": data.get("error_description", "")}
+        else:
+            rtype = type(result).__name__
+            if isinstance(result, list):
+                out["deal_types"] = {"result_type": rtype, "count": len(result), "result_empty": not result}
+            elif isinstance(result, dict):
+                out["deal_types"] = {"result_type": rtype, "result_keys": list(result.keys())[:20], "result_empty": not result}
+            else:
+                out["deal_types"] = {"result_type": rtype, "result_empty": not result}
+    except Exception as e:
+        out["deal_types"] = {"exception": str(e), "exception_type": type(e).__name__}
+    return out
+
+
+def run_sync_reference_data() -> None:
+    """Запускает синхронизацию справочников (воронки, стадии, типы сделок, enum, названия полей UF_CRM_*) в БД."""
+    conn = pg_conn()
+    try:
+        sync_deal_categories(conn)
+        sync_deal_stages(conn)
+        sync_deal_types(conn)
+        sync_field_enums(conn, "deal")
+        sync_field_enums(conn, "contact")
+        sync_field_enums(conn, "lead")
+        sync_userfield_titles(conn, "deal")
+        sync_userfield_titles(conn, "contact")
+        sync_userfield_titles(conn, "lead")
+    except Exception as e:
+        print(f"WARNING: run_sync_reference_data: {e}", file=sys.stderr, flush=True)
+    finally:
+        conn.close()
+
+
+@app.post("/sync/reference-data")
+def sync_reference_data_endpoint(debug: Optional[str] = Query(None, description="1 = только отладка Bitrix, без записи в БД")):
+    """
+    Синхронизирует справочники: воронки (b24_deal_categories), стадии (b24_deal_stages),
+    enum-значения полей UF_CRM_* и др. (b24_field_enum) из Bitrix API.
+    Вызывать после /sync/schema и при необходимости для обновления подписей.
+    Параметр ?debug=1 — в ответ добавится debug с сырыми ответами/ошибками Bitrix (без записи в БД).
+    """
+    if debug == "1":
+        try:
+            debug_info = _debug_bitrix_calls()
+            return {"ok": True, "message": "Debug only (no sync)", "debug": debug_info}
+        except Exception as e:
+            traceback.print_exc()
+            return {"ok": False, "message": str(e), "debug_exception": repr(e)}
+    conn = pg_conn()
+    all_notes: List[str] = []
+    try:
+        cat_rows, cat_notes = sync_deal_categories(conn)
+        all_notes.extend([f"categories: {n}" for n in cat_notes])
+        stage_rows, stage_notes = sync_deal_stages(conn)
+        all_notes.extend([f"stages: {n}" for n in stage_notes])
+        sync_deal_types(conn)
+        sync_sources_from_status(conn)
+        sync_sources_classifier(conn)
+        enum_deal_n, enum_deal_notes = sync_field_enums(conn, "deal")
+        all_notes.extend(enum_deal_notes)
+        sync_field_enums(conn, "contact")
+        sync_field_enums(conn, "lead")
+        titles_deal = sync_userfield_titles(conn, "deal")
+        titles_contact = sync_userfield_titles(conn, "contact")
+        titles_lead = sync_userfield_titles(conn, "lead")
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM b24_deal_categories")
+            cat_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM b24_deal_stages")
+            stage_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM b24_field_enum")
+            enum_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM b24_classifier_sources")
+            sources_count = cur.fetchone()[0]
+        out = {
+            "ok": True,
+            "message": "Reference data synced",
+            "categories": cat_count,
+            "stages": stage_count,
+            "sources": sources_count,
+            "field_enum_values": enum_count,
+            "userfield_titles_updated": {"deal": titles_deal, "contact": titles_contact, "lead": titles_lead},
+        }
+        if cat_count == 0 or stage_count == 0 or enum_count == 0:
+            out["debug_notes"] = all_notes
+        return out
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=repr(e))
+    finally:
+        conn.close()
+
+
 @app.get("/api/data/sources-classifier")
 def get_sources_classifier():
     """
@@ -2649,10 +3428,173 @@ def update_assigned_by_names_endpoint(limit: int = 1000, time_budget_sec: int = 
                     """, (assigned_by_name, deal_id))
                     conn.commit()
                     updated += 1
+                try:
+                    _upsert_b24_user(conn, int(assigned_by_id), assigned_by_name)
+                except Exception:
+                    pass
         
         return {"ok": True, "updated": updated, "total": len(deals_to_update)}
     except Exception as e:
         conn.rollback()
+        raise HTTPException(status_code=500, detail=repr(e))
+    finally:
+        conn.close()
+
+
+def _collect_user_ids_from_tables(conn) -> List[int]:
+    """Собрать все уникальные user ID из колонок deal/contact/lead (assigned_by_id, created_by_id и т.д.)."""
+    user_cols = ["assigned_by_id", "created_by_id", "modified_by_id", "last_activity_by", "moved_by_id"]
+    tables = [
+        ("b24_crm_deal", user_cols),
+        ("b24_crm_contact", user_cols),
+        ("b24_crm_lead", user_cols),
+    ]
+    seen: set = set()
+    with conn.cursor() as cur:
+        for table, cols in tables:
+            try:
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = %s AND column_name = ANY(%s)
+                """, (table, cols))
+                existing = [r[0] for r in cur.fetchall() if r and r[0]]
+                if not existing:
+                    continue
+                for col in existing:
+                    cur.execute(f'SELECT DISTINCT "{col}" FROM "{table}" WHERE "{col}" IS NOT NULL')
+                    for row in cur.fetchall() or []:
+                        if row and row[0] is not None:
+                            try:
+                                uid = int(row[0])
+                                if uid > 0:
+                                    seen.add(uid)
+                            except (TypeError, ValueError):
+                                pass
+            except Exception as e:
+                print(f"WARNING: _collect_user_ids_from_tables {table}: {e}", file=sys.stderr, flush=True)
+    return list(seen)
+
+
+def _user_record_to_name(u: Dict[str, Any]) -> Optional[str]:
+    """Из ответа user.get собрать имя пользователя."""
+    name = u.get("NAME", "").strip()
+    last = u.get("LAST_NAME", "").strip()
+    if name and last:
+        return f"{name} {last}"
+    if name:
+        return name
+    if last:
+        return last
+    return (u.get("FULL_NAME") or u.get("LOGIN") or "").strip() or None
+
+
+def sync_all_users_from_bitrix(conn, time_budget_sec: int = 600) -> Dict[str, Any]:
+    """
+    Загрузить всех пользователей из Bitrix user.get (пагинация start=0, 50, 100, ...)
+    и заполнить b24_users. Один вызов — полный справочник пользователей.
+    """
+    started = time.time()
+    synced = 0
+    start = 0
+    page_size = 50
+    while time.time() - started < time_budget_sec:
+        try:
+            resp = b24.call("user.get", {"start": start})
+            result = resp.get("result") if isinstance(resp, dict) else []
+            if not isinstance(result, list):
+                break
+            if not result:
+                break
+            for u in result:
+                uid = u.get("ID")
+                if uid is None:
+                    continue
+                try:
+                    uid_int = int(uid)
+                except (TypeError, ValueError):
+                    continue
+                full = _user_record_to_name(u)
+                if full:
+                    _upsert_b24_user(conn, uid_int, full)
+                    synced += 1
+            if len(result) < page_size:
+                break
+            start += page_size
+        except Exception as e:
+            print(f"WARNING: sync_all_users_from_bitrix start={start}: {e}", file=sys.stderr, flush=True)
+            break
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM b24_users")
+        cached = cur.fetchone()[0] if cur.rowcount else 0
+    return {"ok": True, "synced": synced, "total_in_cache": cached, "mode": "all"}
+
+
+def sync_users_into_cache(conn, limit: int = 500, time_budget_sec: int = 120) -> Dict[str, Any]:
+    """
+    Заполнить b24_users из Bitrix user.get для тех user ID, которых ещё нет в кэше
+    (только ID, встречающиеся в сделках/контактах/лидах).
+    Для загрузки всех пользователей сразу используйте POST /sync/users?all=1
+    """
+    started = time.time()
+    all_ids = _collect_user_ids_from_tables(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM b24_users")
+        cached = {int(r[0]) for r in cur.fetchall() if r and r[0] is not None}
+    missing = [uid for uid in all_ids if uid not in cached][:limit]
+    if not missing:
+        return {"ok": True, "synced": 0, "total_missing": 0, "cached": len(cached)}
+
+    synced = 0
+    batch_size = 50
+    for i in range(0, len(missing), batch_size):
+        if time.time() - started >= time_budget_sec:
+            break
+        batch = missing[i : i + batch_size]
+        ids_str = ",".join(str(x) for x in batch)
+        try:
+            resp = b24.call("user.get", {"ID": ids_str})
+            result = resp.get("result") if isinstance(resp, dict) else []
+            if not isinstance(result, list):
+                continue
+            for u in result:
+                uid = u.get("ID")
+                if uid is None:
+                    continue
+                try:
+                    uid_int = int(uid)
+                except (TypeError, ValueError):
+                    continue
+                full = _user_record_to_name(u)
+                if full:
+                    _upsert_b24_user(conn, uid_int, full)
+                    synced += 1
+        except Exception as e:
+            print(f"WARNING: sync_users_into_cache batch {ids_str}: {e}", file=sys.stderr, flush=True)
+    return {"ok": True, "synced": synced, "total_missing": len(missing), "cached": len(cached)}
+
+
+@app.post("/sync/users")
+def sync_users_endpoint(
+    all_users: bool = False,
+    limit: int = 500,
+    time_budget_sec: int = 120,
+):
+    """
+    Заполнить b24_users (кэш имён пользователей) из Bitrix.
+
+    - all_users=0 (по умолчанию): только те user ID, что есть в сделках/контактах/лидах и ещё не в кэше.
+    - all_users=1: загрузить всех пользователей из Bitrix сразу (user.get с пагинацией).
+
+    Пример: curl -X POST "http://127.0.0.1:7070/sync/users?all_users=1"
+    """
+    conn = pg_conn()
+    try:
+        if all_users:
+            result = sync_all_users_from_bitrix(conn, time_budget_sec=min(time_budget_sec, 600))
+        else:
+            result = sync_users_into_cache(conn, limit=limit, time_budget_sec=time_budget_sec)
+        return result
+    except Exception as e:
         raise HTTPException(status_code=500, detail=repr(e))
     finally:
         conn.close()
