@@ -2,7 +2,50 @@
 
 **Цель:** добавить на страницу компонент таблицы, в которой пользователь выбирает сущность (сделки, контакты, лиды или смарт-процесс), настраивает видимые поля и смотрит данные в гриде.
 
-**Базовый URL API:** подставляется из конфига (например `https://your-server.com` или относительный путь).
+**Базовый URL API:** подставляется из конфига. Ниже — примеры с реальным хостом (замените на свой, если нужно).
+
+---
+
+## Реальные адреса вызова API (примеры)
+
+Базовый адрес сервера: **http://194.33.40.197:7070** (в проде подставляйте свой из конфига).
+
+### API 1 — Поля сущности (entity-meta-fields)
+
+Метод: **GET**. Возвращает список полей выбранной сущности (human_title, nested_fields и т.д.).
+
+| Сущность        | URL |
+|-----------------|-----|
+| Сделки          | http://194.33.40.197:7070/api/entity-meta-fields/?type=deal |
+| Контакты        | http://194.33.40.197:7070/api/entity-meta-fields/?type=contact |
+| Лиды            | http://194.33.40.197:7070/api/entity-meta-fields/?type=lead |
+| Смарт-процесс   | http://194.33.40.197:7070/api/entity-meta-fields/?type=smart_process&entity_key=sp:1114 |
+
+Для смарт-процесса подставляйте свой `entity_key` (sp:1114, sp:1164 и т.д.).
+
+### API 2 — Данные сущности (entity-meta-data)
+
+Метод: **GET**. Возвращает записи для грида: `{ ok, entity_key, type, total, limit, offset, data: [...] }`. Ключи в объектах внутри `data` — это human_title из первого API.
+
+| Сущность        | Пример URL (первая порция) |
+|-----------------|----------------------------|
+| Сделки          | http://194.33.40.197:7070/api/entity-meta-data/?type=deal&limit=10000&offset=0 |
+| Контакты        | http://194.33.40.197:7070/api/entity-meta-data/?type=contact&limit=10000&offset=0 |
+| Лиды            | http://194.33.40.197:7070/api/entity-meta-data/?type=lead&limit=10000&offset=0 |
+| Смарт-процесс   | http://194.33.40.197:7070/api/entity-meta-data/?type=smart_process&entity_key=sp:1114&limit=10000&offset=0 |
+
+Параметры:
+- **type** — обязательно: `deal` | `contact` | `lead` | `smart_process`
+- **entity_key** — обязательно для `smart_process`, например `sp:1114`
+- **limit** — число записей (макс. 10000 за запрос)
+- **offset** — смещение для следующей порции (0, 10000, 20000, …)
+
+Примеры для пагинации «все данные» (лиды, total=25683):
+- Первая порция: http://194.33.40.197:7070/api/entity-meta-data/?type=lead&limit=10000&offset=0
+- Вторая порция: http://194.33.40.197:7070/api/entity-meta-data/?type=lead&limit=10000&offset=10000
+- Третья порция: http://194.33.40.197:7070/api/entity-meta-data/?type=lead&limit=10000&offset=20000
+
+Вызов из кода: подставьте базовый URL из конфига и сформируйте query-строку с нужными `type`, `entity_key`, `limit`, `offset`.
 
 ---
 
@@ -206,11 +249,16 @@ pageSize = 10000
 
 ## Краткая шпаргалка по эндпоинтам
 
+Конкретные примеры URL см. в разделе **«Реальные адреса вызова API»** выше.
+
 - **Поля сущности:**  
-  `GET /api/entity-meta-fields/?type={deal|contact|lead|smart_process}[&entity_key=sp:1114]`
+  `GET {BASE_URL}/api/entity-meta-fields/?type={deal|contact|lead|smart_process}[&entity_key=sp:1114]`  
+  Пример: http://194.33.40.197:7070/api/entity-meta-fields/?type=lead
 
 - **Данные сущности (для грида):**  
-  `GET /api/entity-meta-data/?type=...&limit=10000&offset=0[&entity_key=sp:1114]`  
+  `GET {BASE_URL}/api/entity-meta-data/?type=...&limit=10000&offset=0[&entity_key=sp:1114]`  
+  Пример: http://194.33.40.197:7070/api/entity-meta-data/?type=lead&limit=10&offset=0  
+
   Максимум записей за один запрос: **limit=10000**. Чтобы показать все записи в гриде с пагинацией 10/25 на странице — загрузить все страницы (offset=0, 10000, 20000, …), склеить `data`, затем пагинировать на фронте (см. раздел «Загрузка всех данных и пагинация в гриде»).
 
 Для смарт-процессов `entity_key` обязателен. Ошибки API возвращают HTTP 4xx/5xx и JSON с полем `detail`.
