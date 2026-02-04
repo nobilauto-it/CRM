@@ -67,6 +67,8 @@ def table_name_for_entity(entity_key: str) -> str:
         return "b24_crm_contact"
     elif entity_key == "lead":
         return "b24_crm_lead"
+    elif entity_key == "company":
+        return "b24_crm_company"
     elif entity_key.startswith("sp:"):
         entity_type_id = entity_key.split(":")[1]
         return f"b24_sp_f_{entity_type_id}"

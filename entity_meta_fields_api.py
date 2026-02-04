@@ -24,6 +24,8 @@ def table_name_for_entity(entity_key: str) -> str:
         return "b24_crm_contact"
     elif entity_key == "lead":
         return "b24_crm_lead"
+    elif entity_key == "company":
+        return "b24_crm_company"
     elif entity_key.startswith("sp:"):
         entity_type_id = entity_key.split(":")[1]
         return f"b24_sp_f_{entity_type_id}"
@@ -279,6 +281,8 @@ def _resolve_nested_entity_key(
         return "contact"
     if field_type == "crm_lead":
         return "lead"
+    if field_type == "crm_company":
+        return "company"
     if field_type == "crm_entity":
         # 1) parentId в имени поля — самый надёжный признак
         for name in (b24_field, column_name):
@@ -431,7 +435,7 @@ def get_entity_meta_fields(
             }
 
             ft_lower = (field_type or "").strip().lower()
-            is_crm_ref = ft_lower in ("crm_contact", "crm_lead", "crm_entity")
+            is_crm_ref = ft_lower in ("crm_contact", "crm_lead", "crm_company", "crm_entity")
             nested_key = None
             if is_crm_ref:
                 nested_key = _resolve_nested_entity_key(

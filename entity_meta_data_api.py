@@ -113,6 +113,8 @@ def _infer_column_type(column_name: str) -> Optional[str]:
         return "crm_contact"
     if c in ("lead_id", "lead", "lead_id"):
         return "crm_lead"
+    if c in ("company_id", "company"):
+        return "crm_company"
     if c == "source_id":
         return "source_id"
     return None
@@ -210,6 +212,107 @@ def _load_lead_titles(conn, ids: List[int]) -> Dict[str, str]:
             title = raw.get("TITLE") or raw.get("title") or raw.get("NAME") or raw.get("name") or str(uid)
             out[str(uid)] = normalize_string(str(title))
     return out
+
+
+def _load_company_titles(conn, ids: List[int]) -> Dict[str, str]:
+    """id -> название компании из b24_crm_company (справочник, синхронизируется из Bitrix)."""
+    if not ids:
+        return {}
+    out: Dict[str, str] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, title FROM b24_crm_company WHERE id = ANY(%s)",
+                (ids,),
+            )
+            for row in cur.fetchall() or []:
+                cid = row.get("id")
+                if cid is not None:
+                    out[str(cid)] = normalize_string(row.get("title") or str(cid))
+    except Exception as e:
+        print(f"WARNING: _load_company_titles: {e}", file=sys.stderr, flush=True)
+    return out
+
+
+def _load_company_data(conn, ids: List[int]) -> Dict[str, Dict[str, Any]]:
+    """id -> {title, raw} из b24_crm_company для построения объекта с полями компании."""
+    if not ids:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, title, raw FROM b24_crm_company WHERE id = ANY(%s)",
+                (ids,),
+            )
+            for row in cur.fetchall() or []:
+                cid = row.get("id")
+                if cid is None:
+                    continue
+                raw = row.get("raw") or {}
+                title = row.get("title") or str(cid)
+                out[str(cid)] = {"title": normalize_string(title), "raw": raw}
+    except Exception as e:
+        print(f"WARNING: _load_company_data: {e}", file=sys.stderr, flush=True)
+    return out
+
+
+def _load_company_field_to_human_title(conn) -> Dict[str, str]:
+    """b24_field -> human_title для entity_key=company (из b24_meta_fields)."""
+    out: Dict[str, str] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT b24_field, column_name, b24_type, is_multiple,
+                       b24_title, b24_labels, settings
+                FROM b24_meta_fields
+                WHERE entity_key = %s
+                ORDER BY b24_field
+            """, ("company",))
+            for row in cur.fetchall() or []:
+                b24_f = (row.get("b24_field") or "").strip()
+                if not b24_f:
+                    continue
+                human = _human_title_from_row(row)
+                if human:
+                    out[b24_f] = normalize_string(human)
+                    out[b24_f.upper()] = out[b24_f]
+                    out[b24_f.lower()] = out[b24_f]
+    except Exception as e:
+        print(f"WARNING: _load_company_field_to_human_title: {e}", file=sys.stderr, flush=True)
+    return out
+
+
+def _build_company_object(company_row: Optional[Dict[str, Any]], field_to_title: Dict[str, str]) -> Dict[str, Any]:
+    """
+    Строит объект { human_title: value } по полям компании из raw.
+    company_row = { title, raw }; raw — объект из Bitrix (ID, TITLE, ADDRESS, ...).
+    """
+    result: Dict[str, Any] = {}
+    if not company_row:
+        return result
+    raw = company_row.get("raw") or {}
+    title_fallback = company_row.get("title") or ""
+    seen_human: set = set()
+    for b24_key in raw:
+        human_title = (
+            field_to_title.get(b24_key)
+            or field_to_title.get((b24_key or "").upper())
+            or field_to_title.get((b24_key or "").lower())
+        )
+        if not human_title or human_title in seen_human:
+            continue
+        seen_human.add(human_title)
+        val = raw[b24_key]
+        if val is None and (b24_key or "").upper() == "TITLE":
+            val = title_fallback
+        try:
+            result[human_title] = _normalize_value(val)
+        except Exception:
+            result[human_title] = val
+    if not result and title_fallback:
+        result["Название"] = title_fallback
+    return result
 
 
 def _load_user_names(conn, ids: List[str]) -> Dict[str, str]:
@@ -354,17 +457,19 @@ def _decode_record(
     stages_map: Optional[Dict[str, str]] = None,
     field_enum_map: Optional[Dict[Tuple[str, str], str]] = None,
     col_to_b24_field: Optional[Dict[str, str]] = None,
+    company_titles: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Подставляет в record человекочитаемые значения вместо ID для полей типа user, crm_contact, crm_lead,
-    source, category_id, stage_id и enum/списочных полей (UF_CRM_* и др.).
-    Все данные только из БД (b24_users, b24_crm_contact, b24_crm_lead, b24_classifier_sources,
+    crm_company, source, category_id, stage_id и enum/списочных полей (UF_CRM_* и др.).
+    Все данные только из БД (b24_users, b24_crm_contact, b24_crm_lead, b24_crm_company, b24_classifier_sources,
     b24_deal_categories, b24_deal_stages, b24_field_enum).
     """
     categories_map = categories_map or {}
     stages_map = stages_map or {}
     field_enum_map = field_enum_map or {}
     col_to_b24_field = col_to_b24_field or {}
+    company_titles = company_titles or {}
     for title, col in title_to_col.items():
         val = record.get(title)
         if val is None and title not in record:
@@ -391,7 +496,11 @@ def _decode_record(
             if val is None:
                 continue
             record[title] = lead_titles.get(str(val).strip(), val)
-        elif (col == "source_id" or (col and col.upper() == "SOURCE_ID")) and entity_key in ("deal", "lead"):
+        elif t in ("crm_company", "company"):
+            if val is None:
+                continue
+            record[title] = company_titles.get(str(val).strip(), val)
+        elif (col == "source_id" or (col and col.upper() == "SOURCE_ID")) and entity_key in ("deal", "lead", "contact"):
             if val is None:
                 continue
             decoded = _source_value_to_title(val, sources)
@@ -473,6 +582,7 @@ def get_entity_meta_data(
 
         contact_ids: List[int] = []
         lead_ids: List[int] = []
+        company_ids: List[int] = []
         user_ids: List[str] = []
         for col, t in col_types.items():
             if t in ("crm_contact", "contact"):
@@ -491,15 +601,24 @@ def get_entity_meta_data(
                             lead_ids.append(int(v))
                         except (TypeError, ValueError):
                             pass
+            elif t in ("crm_company", "company"):
+                for row in rows:
+                    v = row.get(col)
+                    if v is not None and str(v).strip():
+                        try:
+                            company_ids.append(int(v))
+                        except (TypeError, ValueError):
+                            pass
             elif t in ("user", "crm_user", "assigned_by"):
                 for row in rows:
                     v = row.get(col)
                     if v is not None and str(v).strip():
                         user_ids.append(str(v).strip())
 
-        sources_map = _load_sources_classifier(conn) if final_entity_key in ("deal", "lead") else {}
+        sources_map = _load_sources_classifier(conn) if final_entity_key in ("deal", "lead", "contact") else {}
         contact_names_map = _load_contact_names(conn, list(dict.fromkeys(contact_ids))) if contact_ids else {}
         lead_titles_map = _load_lead_titles(conn, list(dict.fromkeys(lead_ids))) if lead_ids else {}
+        company_titles_map = _load_company_titles(conn, list(dict.fromkeys(company_ids))) if company_ids else {}
         user_ids_unique = list(dict.fromkeys(user_ids))
         user_names_map = _load_user_names(conn, user_ids_unique) if user_ids_unique else {}
 
@@ -534,6 +653,7 @@ def get_entity_meta_data(
                 stages_map=stages_map,
                 field_enum_map=field_enum_map,
                 col_to_b24_field=col_to_b24,
+                company_titles=company_titles_map,
             )
             data.append(record)
 

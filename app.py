@@ -419,6 +419,16 @@ def ensure_meta_tables(conn):
         );
         """)
 
+        # Кэш компаний CRM (id, title, raw) для расшифровки COMPANY_ID и полей компании в сделках/контактах
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS b24_crm_company (
+            id BIGINT PRIMARY KEY,
+            title TEXT,
+            updated_at TIMESTAMPTZ DEFAULT now()
+        );
+        """)
+        cur.execute("ALTER TABLE b24_crm_company ADD COLUMN IF NOT EXISTS raw JSONB;")
+
         # Воронки сделок (категории): id — ID категории, name — название
         cur.execute("""
         CREATE TABLE IF NOT EXISTS b24_deal_categories (
@@ -569,6 +579,8 @@ def table_name_for_entity(entity_key: str) -> str:
         return "b24_crm_contact"
     if entity_key == "lead":
         return "b24_crm_lead"
+    if entity_key == "company":
+        return "b24_crm_company"
     if entity_key.startswith("sp:"):
         etid = entity_key.split(":", 1)[1]
         return f"b24_sp_{sanitize_ident(etid, max_len=20)}"
@@ -917,8 +929,8 @@ def sync_deal_categories(conn) -> Tuple[List[Tuple[str, str]], List[str]]:
 def sync_sources_from_status(conn) -> int:
     """
     Синхронизирует стандартные источники (SOURCE) из crm.status.list ENTITY_ID=SOURCE
-    в b24_classifier_sources и в b24_field_enum (deal/lead source_id). Так значение «Источник»
-    в сделках/лидах будет показывать название вместо кода (UC_Z315Y5 и т.д.).
+    в b24_classifier_sources и в b24_field_enum (deal/lead/contact source_id). Так значение «Источник»
+    в сделках/лидах/контактах будет показывать название вместо кода (UC_Z315Y5 и т.д.).
     """
     try:
         data = b24.call("crm.status.list", {"filter": {"ENTITY_ID": "SOURCE"}})
@@ -963,6 +975,7 @@ def sync_sources_from_status(conn) -> int:
             for sid_str, name_str in rows:
                 enum_rows.append(("deal", "source_id", sid_str, name_str))
                 enum_rows.append(("lead", "source_id", sid_str, name_str))
+                enum_rows.append(("contact", "source_id", sid_str, name_str))
             if enum_rows:
                 execute_values(
                     cur,
@@ -1573,6 +1586,14 @@ def fetch_lead_fields() -> Dict[str, Any]:
     res = data.get("result", {})
     return res if isinstance(res, dict) else {}
 
+
+def fetch_company_fields() -> Dict[str, Any]:
+    """Поля компании из Bitrix (crm.company.fields) для nested_fields в entity-meta-fields."""
+    data = b24.call("crm.company.fields")
+    res = data.get("result", {})
+    return res if isinstance(res, dict) else {}
+
+
 def fetch_smart_process_types() -> List[Dict[str, Any]]:
     data = b24.call("crm.type.list", {"select": ["id", "title", "entityTypeId"]})
     res = data.get("result", {})
@@ -1730,6 +1751,77 @@ def b24_list_leads(start: int = 0, filter_params: Optional[Dict[str, Any]] = Non
     
     return resp
 
+
+def b24_list_companies(start: int = 0, filter_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Получает компании из Bitrix (crm.company.list) для справочника id -> title.
+    """
+    params = {
+        "select": ["*"],
+        "start": start,
+        "order": {"ID": "ASC"},
+    }
+    filter_dict = {}
+    if start > 0:
+        filter_dict[">ID"] = start
+    if filter_params:
+        filter_dict.update(filter_params)
+    if filter_dict:
+        params["filter"] = filter_dict
+    resp = b24.call("crm.company.list", params)
+    if resp and "error" in resp and resp.get("error") == "OVERLOAD_LIMIT":
+        print("WARNING: b24_list_companies: API blocked (OVERLOAD_LIMIT), returning empty result", file=sys.stderr, flush=True)
+        return {"result": []}
+    return resp
+
+
+def sync_companies(conn, time_budget_sec: int = 300) -> int:
+    """
+    Синхронизирует справочник компаний из Bitrix в b24_crm_company (id, title, raw).
+    raw — полный объект компании для отдачи полей в entity-meta-data.
+    """
+    total = 0
+    start = 0
+    begun = time.time()
+    while time.time() - begun < time_budget_sec:
+        resp = b24_list_companies(start=start, filter_params=None)
+        items, nxt = normalize_list_result(resp)
+        if not items:
+            break
+        rows: List[Tuple[int, str, Any]] = []
+        for it in items:
+            cid = it.get("ID") or it.get("id")
+            if cid is None:
+                continue
+            title = it.get("TITLE") or it.get("title") or ""
+            rows.append((int(cid), (title or str(cid)).strip(), Json(it)))
+        if rows:
+            try:
+                with conn.cursor() as cur:
+                    execute_values(
+                        cur,
+                        """
+                        INSERT INTO b24_crm_company (id, title, raw)
+                        VALUES %s
+                        ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, raw = EXCLUDED.raw, updated_at = now()
+                        """,
+                        rows,
+                        page_size=200,
+                    )
+                conn.commit()
+                total += len(rows)
+            except Exception as e:
+                conn.rollback()
+                print(f"WARNING: sync_companies insert: {e}", file=sys.stderr, flush=True)
+                break
+        if nxt is None:
+            break
+        start = int(nxt)
+    if total:
+        print(f"INFO: sync_companies: synced {total} companies", file=sys.stderr, flush=True)
+    return total
+
+
 # -----------------------------
 # Main schema sync
 # -----------------------------
@@ -1806,6 +1898,18 @@ def sync_schema() -> Dict[str, Any]:
         upsert_meta_fields(conn, "lead", lead_fields, lead_colmap)
         sync_userfield_titles(conn, "lead")
 
+        # Метаполя компании (для nested_fields в entity-meta-fields; данные компаний — в b24_crm_company)
+        company_fields = fetch_company_fields()
+        if company_fields:
+            company_entity = {"entity_key": "company", "entity_kind": "company", "title": "CRM Company", "entity_type_id": None}
+            upsert_meta_entities(conn, [company_entity])
+            existing_cols_company = set(["id", "raw", "created_at", "updated_at"])
+            company_colmap: Dict[str, str] = {}
+            for f in company_fields.keys():
+                base = sanitize_ident(f)
+                company_colmap[f] = unique_column_name(existing_cols_company, base)
+            upsert_meta_fields(conn, "company", company_fields, company_colmap)
+
         # Синхронизируем классификатор источников: стандартные SOURCE + пользовательское поле Sursa
         sync_sources_from_status(conn)
         sync_sources_classifier(conn)
@@ -1854,13 +1958,16 @@ def sync_schema() -> Dict[str, Any]:
 
             smart_results.append({"entity_key": entity_key, "table": table, "fields_count": len(fields)})
 
-        return {
+        out = {
             "ok": True,
             "deal": {"table": deal_table, "fields_count": len(deal_fields)},
             "contact": {"table": contact_table, "fields_count": len(contact_fields)},
             "lead": {"table": lead_table, "fields_count": len(lead_fields)},
             "smart_processes": {"count": len(smart_entities), "items": smart_results[:50]}
         }
+        if company_fields:
+            out["company"] = {"fields_count": len(company_fields)}
+        return out
     finally:
         conn.close()
 
@@ -3154,12 +3261,13 @@ def _debug_bitrix_calls() -> Dict[str, Any]:
 
 
 def run_sync_reference_data() -> None:
-    """Запускает синхронизацию справочников (воронки, стадии, типы сделок, enum, названия полей UF_CRM_*) в БД."""
+    """Запускает синхронизацию справочников (воронки, стадии, типы сделок, enum, компании, названия полей UF_CRM_*) в БД."""
     conn = pg_conn()
     try:
         sync_deal_categories(conn)
         sync_deal_stages(conn)
         sync_deal_types(conn)
+        sync_companies(conn)
         sync_field_enums(conn, "deal")
         sync_field_enums(conn, "contact")
         sync_field_enums(conn, "lead")
@@ -3195,6 +3303,7 @@ def sync_reference_data_endpoint(debug: Optional[str] = Query(None, description=
         stage_rows, stage_notes = sync_deal_stages(conn)
         all_notes.extend([f"stages: {n}" for n in stage_notes])
         sync_deal_types(conn)
+        sync_companies(conn)
         sync_sources_from_status(conn)
         sync_sources_classifier(conn)
         enum_deal_n, enum_deal_notes = sync_field_enums(conn, "deal")
@@ -3213,12 +3322,15 @@ def sync_reference_data_endpoint(debug: Optional[str] = Query(None, description=
             enum_count = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM b24_classifier_sources")
             sources_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM b24_crm_company")
+            companies_count = cur.fetchone()[0]
         out = {
             "ok": True,
             "message": "Reference data synced",
             "categories": cat_count,
             "stages": stage_count,
             "sources": sources_count,
+            "companies": companies_count,
             "field_enum_values": enum_count,
             "userfield_titles_updated": {"deal": titles_deal, "contact": titles_contact, "lead": titles_lead},
         }
