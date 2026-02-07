@@ -283,14 +283,20 @@ def _load_company_field_to_human_title(conn) -> Dict[str, str]:
     return out
 
 
-def _build_company_object(company_row: Optional[Dict[str, Any]], field_to_title: Dict[str, str]) -> Dict[str, Any]:
+def _build_company_object(
+    company_row: Optional[Dict[str, Any]],
+    field_to_title: Dict[str, str],
+    company_field_enum_map: Optional[Dict[Tuple[str, str], str]] = None,
+) -> Dict[str, Any]:
     """
     Строит объект { human_title: value } по полям компании из raw.
-    company_row = { title, raw }; raw — объект из Bitrix (ID, TITLE, ADDRESS, ...).
+    company_row = { title, raw }; raw — объект из Bitrix (ID, TITLE, ADDRESS, UF_CRM_* ...).
+    Значения enum/списков расшифровываются через company_field_enum_map.
     """
     result: Dict[str, Any] = {}
     if not company_row:
         return result
+    company_field_enum_map = company_field_enum_map or {}
     raw = company_row.get("raw") or {}
     title_fallback = company_row.get("title") or ""
     seen_human: set = set()
@@ -306,6 +312,10 @@ def _build_company_object(company_row: Optional[Dict[str, Any]], field_to_title:
         val = raw[b24_key]
         if val is None and (b24_key or "").upper() == "TITLE":
             val = title_fallback
+        if val is not None and company_field_enum_map:
+            decoded = _enum_value_to_title(val, company_field_enum_map, b24_key or "")
+            if decoded is not val:
+                val = decoded
         try:
             result[human_title] = _normalize_value(val)
         except Exception:
@@ -364,6 +374,26 @@ def _load_deal_categories(conn) -> Dict[str, str]:
             cur.execute("SELECT id, name FROM b24_deal_categories")
             for row in cur.fetchall() or []:
                 cid = row.get("id")
+                if cid is not None:
+                    out[str(cid)] = normalize_string(row.get("name") or str(cid))
+    except Exception:
+        pass
+    return out
+
+
+def _load_sp_categories(conn, entity_type_id: str) -> Dict[str, str]:
+    """category_id -> name из b24_sp_categories для смарт-процесса (воронки)."""
+    out: Dict[str, str] = {}
+    if not entity_type_id:
+        return out
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT category_id, name FROM b24_sp_categories WHERE entity_type_id = %s",
+                (str(entity_type_id).strip(),),
+            )
+            for row in cur.fetchall() or []:
+                cid = row.get("category_id")
                 if cid is not None:
                     out[str(cid)] = normalize_string(row.get("name") or str(cid))
     except Exception:
@@ -458,10 +488,15 @@ def _decode_record(
     field_enum_map: Optional[Dict[Tuple[str, str], str]] = None,
     col_to_b24_field: Optional[Dict[str, str]] = None,
     company_titles: Optional[Dict[str, str]] = None,
+    company_data: Optional[Dict[str, Dict[str, Any]]] = None,
+    company_field_to_title: Optional[Dict[str, str]] = None,
+    company_field_enum_map: Optional[Dict[Tuple[str, str], str]] = None,
+    sp_categories_map: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Подставляет в record человекочитаемые значения вместо ID для полей типа user, crm_contact, crm_lead,
-    crm_company, source, category_id, stage_id и enum/списочных полей (UF_CRM_* и др.).
+    crm_company (полный объект с полями компании и человекочитаемыми названиями/значениями), source,
+    category_id, stage_id и enum/списочных полей (UF_CRM_* и др.).
     Все данные только из БД (b24_users, b24_crm_contact, b24_crm_lead, b24_crm_company, b24_classifier_sources,
     b24_deal_categories, b24_deal_stages, b24_field_enum).
     """
@@ -470,6 +505,10 @@ def _decode_record(
     field_enum_map = field_enum_map or {}
     col_to_b24_field = col_to_b24_field or {}
     company_titles = company_titles or {}
+    company_data = company_data or {}
+    company_field_to_title = company_field_to_title or {}
+    company_field_enum_map = company_field_enum_map or {}
+    sp_categories_map = sp_categories_map or {}
     for title, col in title_to_col.items():
         val = record.get(title)
         if val is None and title not in record:
@@ -479,7 +518,13 @@ def _decode_record(
             if val is not None and str(val).strip():
                 record[title] = categories_map.get(str(val).strip(), val)
             continue
-        if entity_key == "deal" and (col in ("stage_id", "stageid") or col and col.upper() == "STAGE_ID"):
+        if (entity_key or "").startswith("sp:") and (col in ("category_id", "categoryid") or col and col.upper() == "CATEGORY_ID"):
+            if val is not None and str(val).strip() and sp_categories_map:
+                record[title] = sp_categories_map.get(str(val).strip(), val)
+            continue
+        if (entity_key == "deal" or (entity_key or "").startswith("sp:")) and (
+            col in ("stage_id", "stageid") or (col and col.upper() in ("STAGE_ID", "STAGEID"))
+        ):
             if val is not None and str(val).strip():
                 record[title] = stages_map.get(str(val).strip(), val)
             continue
@@ -499,8 +544,18 @@ def _decode_record(
         elif t in ("crm_company", "company"):
             if val is None:
                 continue
-            record[title] = company_titles.get(str(val).strip(), val)
-        elif (col == "source_id" or (col and col.upper() == "SOURCE_ID")) and entity_key in ("deal", "lead", "contact"):
+            key = str(val).strip()
+            company_row = company_data.get(key)
+            if company_row and company_field_to_title:
+                obj = _build_company_object(
+                    company_row, company_field_to_title, company_field_enum_map
+                )
+                record[title] = obj if obj else company_titles.get(key, val)
+            else:
+                record[title] = company_titles.get(key, val)
+        elif (col == "source_id" or (col and col.upper() == "SOURCE_ID")) and (
+            entity_key in ("deal", "lead", "contact") or (entity_key or "").startswith("sp:")
+        ):
             if val is None:
                 continue
             decoded = _source_value_to_title(val, sources)
@@ -522,10 +577,15 @@ def get_entity_meta_data(
     entity_key: Optional[str] = Query(None, description="Для smart_process обязателен, например sp:1114"),
     limit: int = Query(100, ge=1, le=10000, description="Максимум записей"),
     offset: int = Query(0, ge=0, description="Смещение"),
+    fields: Optional[str] = Query(
+        None,
+        description="Список полей (human_title через запятую). Если задан — в ответе только эти поля; иначе все.",
+    ),
 ) -> Dict[str, Any]:
     """
     Возвращает значения полей сущности: массив записей, ключи в каждой записи = human_title
     (как в /api/entity-meta-fields/), значения — из БД.
+    Параметр fields — только запрошенные поля в каждой записи (меньше трафика и разбора на фронте).
     """
     if type not in ("smart_process", "deal", "contact", "lead"):
         raise HTTPException(
@@ -564,11 +624,19 @@ def get_entity_meta_data(
                 "limit": limit,
                 "offset": offset,
                 "data": [],
+                "fields": [],
             }
 
         columns = list(col_to_title.keys())
-        columns_str = ", ".join(f'"{c}"' for c in columns)
         title_to_col = {title: col for col, title in col_to_title.items()}
+        if fields:
+            requested_titles = [s.strip() for s in fields.split(",") if s.strip()]
+            if requested_titles:
+                requested_cols = [title_to_col.get(t) for t in requested_titles if title_to_col.get(t)]
+                requested_cols = list(dict.fromkeys(c for c in requested_cols if c))
+                if requested_cols:
+                    columns = requested_cols
+        columns_str = ", ".join(f'"{c}"' for c in columns)
         col_types = _col_types_with_infer(
             conn, final_entity_key, columns, _load_meta_column_types(conn, final_entity_key)
         )
@@ -615,16 +683,33 @@ def get_entity_meta_data(
                     if v is not None and str(v).strip():
                         user_ids.append(str(v).strip())
 
-        sources_map = _load_sources_classifier(conn) if final_entity_key in ("deal", "lead", "contact") else {}
+        sources_map = (
+            _load_sources_classifier(conn)
+            if final_entity_key in ("deal", "lead", "contact") or (final_entity_key or "").startswith("sp:")
+            else {}
+        )
         contact_names_map = _load_contact_names(conn, list(dict.fromkeys(contact_ids))) if contact_ids else {}
         lead_titles_map = _load_lead_titles(conn, list(dict.fromkeys(lead_ids))) if lead_ids else {}
-        company_titles_map = _load_company_titles(conn, list(dict.fromkeys(company_ids))) if company_ids else {}
+        company_ids_unique = list(dict.fromkeys(company_ids))
+        company_titles_map = _load_company_titles(conn, company_ids_unique) if company_ids else {}
+        company_data_map = _load_company_data(conn, company_ids_unique) if company_ids else {}
+        company_field_to_title_map = _load_company_field_to_human_title(conn) if company_ids else {}
+        company_b24_fields = list(company_field_to_title_map.keys()) if company_field_to_title_map else []
+        company_field_enum_map = (
+            _load_field_enum_map(conn, "company", company_b24_fields) if company_b24_fields else {}
+        )
         user_ids_unique = list(dict.fromkeys(user_ids))
         user_names_map = _load_user_names(conn, user_ids_unique) if user_ids_unique else {}
 
         col_to_b24 = _load_col_to_b24_field(conn, final_entity_key)
         categories_map = _load_deal_categories(conn) if final_entity_key == "deal" else {}
-        stages_map = _load_deal_stages(conn) if final_entity_key == "deal" else {}
+        sp_entity_type_id = (final_entity_key or "").split(":")[-1] if (final_entity_key or "").startswith("sp:") else ""
+        sp_categories_map = _load_sp_categories(conn, sp_entity_type_id) if sp_entity_type_id else {}
+        stages_map = (
+            _load_deal_stages(conn)
+            if final_entity_key == "deal" or (final_entity_key or "").startswith("sp:")
+            else {}
+        )
         b24_fields_for_enum = list(dict.fromkeys(col_to_b24.values())) if col_to_b24 else []
         field_enum_map = _load_field_enum_map(conn, final_entity_key, b24_fields_for_enum) if b24_fields_for_enum else {}
 
@@ -654,10 +739,14 @@ def get_entity_meta_data(
                 field_enum_map=field_enum_map,
                 col_to_b24_field=col_to_b24,
                 company_titles=company_titles_map,
+                company_data=company_data_map,
+                company_field_to_title=company_field_to_title_map,
+                company_field_enum_map=company_field_enum_map,
+                sp_categories_map=sp_categories_map,
             )
             data.append(record)
 
-        return {
+        out: Dict[str, Any] = {
             "ok": True,
             "entity_key": final_entity_key,
             "type": type,
@@ -666,6 +755,8 @@ def get_entity_meta_data(
             "offset": offset,
             "data": data,
         }
+        out["fields"] = [col_to_title.get(c, c) for c in columns]
+        return out
     except HTTPException:
         raise
     except Exception as e:

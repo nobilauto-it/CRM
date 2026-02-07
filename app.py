@@ -446,6 +446,16 @@ def ensure_meta_tables(conn):
             updated_at TIMESTAMPTZ DEFAULT now()
         );
         """)
+        # Воронки смарт-процессов: entity_type_id + category_id -> название воронки
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS b24_sp_categories (
+            entity_type_id TEXT NOT NULL,
+            category_id TEXT NOT NULL,
+            name TEXT,
+            updated_at TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (entity_type_id, category_id)
+        );
+        """)
         # Enum/списочные значения полей (в т.ч. UF_CRM_*): по entity_key + b24_field + value_id — value_title
         cur.execute("""
         CREATE TABLE IF NOT EXISTS b24_field_enum (
@@ -1056,6 +1066,111 @@ def sync_deal_stages(conn) -> Tuple[List[Tuple[str, str, str]], List[str]]:
     return rows, debug_notes
 
 
+def sync_smart_process_stages(conn) -> Tuple[int, List[str]]:
+    """
+    Заполняет b24_deal_stages стадиями смарт-процессов из crm.status.list.
+    ENTITY_ID для смарт-процесса: DYNAMIC_{entityTypeId}_STAGE_{funnelId}.
+    stage_id в Bitrix приходит как DT1114_1:NEW и т.д.
+    """
+    debug_notes: List[str] = []
+    rows: List[Tuple[str, str, str]] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT entity_type_id FROM b24_meta_entities
+                WHERE entity_kind = 'smart_process' AND entity_type_id IS NOT NULL
+                ORDER BY entity_type_id
+            """)
+            entity_type_ids = [int(r[0]) for r in cur.fetchall() if r and r[0] is not None]
+    except Exception as e:
+        debug_notes.append(f"smart_stages meta: {e}")
+        return 0, debug_notes
+    if not entity_type_ids:
+        return 0, debug_notes
+    sp_category_rows: List[Tuple[str, str, str]] = []
+    for etid in entity_type_ids:
+        category_ids: List[int] = [0]
+        try:
+            data = b24.call("crm.category.list", {"entityTypeId": etid})
+            result = data.get("result") or {}
+            cats = result.get("categories") or result.get("result") or []
+            if isinstance(cats, list) and cats:
+                for c in cats:
+                    if isinstance(c, dict):
+                        cid = c.get("id") or c.get("ID")
+                        cname = c.get("name") or c.get("NAME") or c.get("title") or c.get("TITLE") or ""
+                        if cid is not None:
+                            category_ids.append(int(cid))
+                            sp_category_rows.append((str(etid), str(cid), (cname or str(cid)).strip()))
+                category_ids = list(dict.fromkeys(category_ids))
+        except Exception as e:
+            debug_notes.append(f"smart_stages category etid={etid}: {e}")
+        for cat_id in category_ids:
+            entity_id = f"DYNAMIC_{etid}_STAGE_{cat_id}" if cat_id != 0 else f"DYNAMIC_{etid}_STAGE"
+            try:
+                data = b24.call("crm.status.list", {"filter": {"ENTITY_ID": entity_id}})
+                result = data.get("result")
+                if not result:
+                    continue
+                items = result if isinstance(result, list) else (
+                    result.get("result") or result.get("statuses") or result.get("items") or []
+                )
+                if not isinstance(items, list):
+                    items = []
+                cat_str = str(cat_id)
+                for st in items:
+                    sid = None
+                    name = ""
+                    if isinstance(st, dict):
+                        sid = st.get("STATUS_ID") or st.get("statusId") or st.get("id") or st.get("ID")
+                        name = st.get("NAME") or st.get("name") or st.get("title") or st.get("TITLE") or ""
+                    elif st is not None and not isinstance(st, (dict, list)):
+                        sid = st
+                        name = str(st)
+                    if sid is None:
+                        continue
+                    rows.append((str(sid), cat_str, (name or str(sid)).strip()))
+            except Exception as e:
+                debug_notes.append(f"smart_stages status etid={etid} cat={cat_id}: {e}")
+    if rows:
+        try:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO b24_deal_stages (stage_id, category_id, name)
+                    VALUES %s
+                    ON CONFLICT (stage_id) DO UPDATE SET category_id = EXCLUDED.category_id, name = EXCLUDED.name, updated_at = now()
+                    """,
+                    rows,
+                    page_size=200,
+                )
+            conn.commit()
+            print(f"INFO: sync_smart_process_stages: synced {len(rows)} stages", file=sys.stderr, flush=True)
+        except Exception as e:
+            conn.rollback()
+            debug_notes.append(f"smart_stages insert: {e}")
+    if sp_category_rows:
+        try:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO b24_sp_categories (entity_type_id, category_id, name)
+                    VALUES %s
+                    ON CONFLICT (entity_type_id, category_id) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+                    """,
+                    sp_category_rows,
+                    page_size=200,
+                )
+            conn.commit()
+            print(f"INFO: sync_smart_process_stages: synced {len(sp_category_rows)} SP categories", file=sys.stderr, flush=True)
+        except Exception as e:
+            conn.rollback()
+            debug_notes.append(f"smart_stages categories insert: {e}")
+    return len(rows), debug_notes
+
+
 def sync_deal_types(conn) -> None:
     """Заполняет b24_field_enum типами сделок (TYPE_ID) из crm.status.list ENTITY_ID=DEAL_TYPE."""
     rows: List[Tuple[str, str, str, str]] = []
@@ -1144,6 +1259,8 @@ def sync_field_enums(conn, entity_key: str) -> Tuple[int, List[str]]:
         method = "crm.contact.userfield.list"
     elif entity_key == "lead":
         method = "crm.lead.userfield.list"
+    elif entity_key == "company":
+        method = "crm.company.userfield.list"
     else:
         return 0, []
     try:
@@ -1323,6 +1440,9 @@ def sync_userfield_titles(conn, entity_key: str) -> int:
     elif entity_key == "lead":
         method = "crm.lead.userfield.list"
         method_fallback = "crm.lead.fields"
+    elif entity_key == "company":
+        method = "crm.company.userfield.list"
+        method_fallback = "crm.company.fields"
     else:
         return 0
     updated = 0
@@ -1909,6 +2029,7 @@ def sync_schema() -> Dict[str, Any]:
                 base = sanitize_ident(f)
                 company_colmap[f] = unique_column_name(existing_cols_company, base)
             upsert_meta_fields(conn, "company", company_fields, company_colmap)
+            sync_userfield_titles(conn, "company")
 
         # Синхронизируем классификатор источников: стандартные SOURCE + пользовательское поле Sursa
         sync_sources_from_status(conn)
@@ -3266,14 +3387,17 @@ def run_sync_reference_data() -> None:
     try:
         sync_deal_categories(conn)
         sync_deal_stages(conn)
+        sync_smart_process_stages(conn)
         sync_deal_types(conn)
         sync_companies(conn)
         sync_field_enums(conn, "deal")
         sync_field_enums(conn, "contact")
         sync_field_enums(conn, "lead")
+        sync_field_enums(conn, "company")
         sync_userfield_titles(conn, "deal")
         sync_userfield_titles(conn, "contact")
         sync_userfield_titles(conn, "lead")
+        sync_userfield_titles(conn, "company")
     except Exception as e:
         print(f"WARNING: run_sync_reference_data: {e}", file=sys.stderr, flush=True)
     finally:
@@ -3302,6 +3426,7 @@ def sync_reference_data_endpoint(debug: Optional[str] = Query(None, description=
         all_notes.extend([f"categories: {n}" for n in cat_notes])
         stage_rows, stage_notes = sync_deal_stages(conn)
         all_notes.extend([f"stages: {n}" for n in stage_notes])
+        sync_smart_process_stages(conn)
         sync_deal_types(conn)
         sync_companies(conn)
         sync_sources_from_status(conn)
@@ -3310,9 +3435,11 @@ def sync_reference_data_endpoint(debug: Optional[str] = Query(None, description=
         all_notes.extend(enum_deal_notes)
         sync_field_enums(conn, "contact")
         sync_field_enums(conn, "lead")
+        sync_field_enums(conn, "company")
         titles_deal = sync_userfield_titles(conn, "deal")
         titles_contact = sync_userfield_titles(conn, "contact")
         titles_lead = sync_userfield_titles(conn, "lead")
+        sync_userfield_titles(conn, "company")
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM b24_deal_categories")
             cat_count = cur.fetchone()[0]
