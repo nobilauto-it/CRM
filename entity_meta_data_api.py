@@ -46,6 +46,20 @@ def _table_has_column(conn, table_name: str, column_name: str) -> bool:
         return cur.fetchone() is not None
 
 
+def _get_category_column_from_table(conn, table_name: str) -> Optional[str]:
+    """Возвращает имя колонки воронки (category_id и т.п.) в таблице, если есть."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+        """, (table_name,))
+        for row in cur.fetchall() or []:
+            col = row[0] if isinstance(row, (list, tuple)) else row.get("column_name")
+            if col and _is_category_column(col):
+                return col
+    return None
+
+
 def _col_to_human_title_map(conn, entity_key: str) -> Dict[str, str]:
     """
     Возвращает маппинг column_name -> human_title для сущности.
@@ -458,6 +472,30 @@ def _source_value_to_title(val: Any, sources: Dict[str, str]) -> Any:
     return val
 
 
+def _is_category_column(col: Optional[str]) -> bool:
+    """Проверяет, что колонка — это воронка/категория (deal или smart_process)."""
+    if not col:
+        return False
+    c = (col or "").replace("_", "").replace(" ", "").upper()
+    return c == "CATEGORYID"
+
+
+def _category_id_to_name(val: Any, name_map: Dict[str, str]) -> Any:
+    """Подставляет название воронки по id; name_map ключи — строки (id)."""
+    if val is None or not name_map:
+        return val
+    s = str(val).strip()
+    if s in name_map:
+        return name_map[s]
+    try:
+        n = int(val)
+        if str(n) in name_map:
+            return name_map[str(n)]
+    except (TypeError, ValueError):
+        pass
+    return val
+
+
 def _enum_value_to_title(val: Any, field_enum_map: Dict[Tuple[str, str], str], b24_field: str) -> Any:
     """Подставляет название по value_id; значение может быть 'id' или 'id|extra' (например 0|MDL)."""
     if val is None:
@@ -514,13 +552,11 @@ def _decode_record(
         if val is None and title not in record:
             continue
         t = (col_types.get(col) or "").strip().lower()
-        if entity_key == "deal" and (col in ("category_id", "categoryid") or col and col.upper() == "CATEGORY_ID"):
-            if val is not None and str(val).strip():
-                record[title] = categories_map.get(str(val).strip(), val)
+        if entity_key == "deal" and _is_category_column(col):
+            record[title] = _category_id_to_name(val, categories_map)
             continue
-        if (entity_key or "").startswith("sp:") and (col in ("category_id", "categoryid") or col and col.upper() == "CATEGORY_ID"):
-            if val is not None and str(val).strip() and sp_categories_map:
-                record[title] = sp_categories_map.get(str(val).strip(), val)
+        if (entity_key or "").startswith("sp:") and _is_category_column(col):
+            record[title] = _category_id_to_name(val, sp_categories_map)
             continue
         if (entity_key == "deal" or (entity_key or "").startswith("sp:")) and (
             col in ("stage_id", "stageid") or (col and col.upper() in ("STAGE_ID", "STAGEID"))
@@ -581,11 +617,16 @@ def get_entity_meta_data(
         None,
         description="Список полей (human_title через запятую). Если задан — в ответе только эти поля; иначе все.",
     ),
+    category_id: Optional[str] = Query(
+        None,
+        description="Фильтр по воронке/категории (для deal и smart_process). В ответе только записи этой категории; total считается по отфильтрованным.",
+    ),
 ) -> Dict[str, Any]:
     """
     Возвращает значения полей сущности: массив записей, ключи в каждой записи = human_title
     (как в /api/entity-meta-fields/), значения — из БД.
-    Параметр fields — только запрошенные поля в каждой записи (меньше трафика и разбора на фронте).
+    Параметр fields — только запрошенные поля в каждой записи.
+    Параметр category_id — фильтр по воронке (deal/smart_process); total — по отфильтрованным записям.
     """
     if type not in ("smart_process", "deal", "contact", "lead"):
         raise HTTPException(
@@ -610,10 +651,6 @@ def get_entity_meta_data(
     table_name = table_name_for_entity(final_entity_key)
     conn = pg_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(f'SELECT COUNT(*) AS cnt FROM "{table_name}"')
-            total = cur.fetchone()[0] if cur.rowcount else 0
-
         col_to_title = _col_to_human_title_map(conn, final_entity_key)
         if not col_to_title:
             return {
@@ -627,7 +664,28 @@ def get_entity_meta_data(
                 "fields": [],
             }
 
-        columns = list(col_to_title.keys())
+        all_columns = list(col_to_title.keys())
+        category_col = next((c for c in all_columns if _is_category_column(c)), None)
+        cid = (str(category_id).strip() if category_id is not None else "") or ""
+        if cid and not category_col:
+            category_col = _get_category_column_from_table(conn, table_name)
+        where_sql = ""
+        count_params: List[Any] = []
+        select_params: List[Any] = []
+        if cid and category_col:
+            safe_col = category_col.replace('"', '""')
+            where_sql = f' WHERE "{safe_col}"::text = %s'
+            count_params = [cid]
+            select_params = [cid, limit, offset]
+
+        with conn.cursor() as cur:
+            if where_sql:
+                cur.execute(f'SELECT COUNT(*) AS cnt FROM "{table_name}"{where_sql}', count_params)
+            else:
+                cur.execute(f'SELECT COUNT(*) AS cnt FROM "{table_name}"')
+            total = cur.fetchone()[0] if cur.rowcount else 0
+
+        columns = list(all_columns)
         title_to_col = {title: col for col, title in col_to_title.items()}
         if fields:
             requested_titles = [s.strip() for s in fields.split(",") if s.strip()]
@@ -642,10 +700,16 @@ def get_entity_meta_data(
         )
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f'SELECT {columns_str} FROM "{table_name}" ORDER BY id DESC LIMIT %s OFFSET %s',
-                (limit, offset),
-            )
+            if where_sql:
+                cur.execute(
+                    f'SELECT {columns_str} FROM "{table_name}"{where_sql} ORDER BY id DESC LIMIT %s OFFSET %s',
+                    tuple(select_params),
+                )
+            else:
+                cur.execute(
+                    f'SELECT {columns_str} FROM "{table_name}" ORDER BY id DESC LIMIT %s OFFSET %s',
+                    (limit, offset),
+                )
             rows = cur.fetchall()
 
         contact_ids: List[int] = []
