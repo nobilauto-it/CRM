@@ -433,14 +433,22 @@ def _load_deal_stages(conn) -> Dict[str, str]:
 def _load_field_enum_map(conn, entity_key: str, b24_fields: List[str]) -> Dict[Tuple[str, str], str]:
     """(b24_field, value_id) -> value_title из b24_field_enum для указанных полей."""
     out: Dict[Tuple[str, str], str] = {}
-    if not b24_fields:
-        return out
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT b24_field, value_id, value_title FROM b24_field_enum
-                WHERE entity_key = %s AND b24_field = ANY(%s)
-            """, (entity_key, b24_fields))
+            if (entity_key or "").startswith("sp:"):
+                # Для смарт-процессов подгружаем все enum по сущности (без фильтра по полям),
+                # чтобы не терять расшифровку из-за расхождения имён полей.
+                cur.execute("""
+                    SELECT b24_field, value_id, value_title FROM b24_field_enum
+                    WHERE entity_key = %s
+                """, (entity_key,))
+            else:
+                if not b24_fields:
+                    return out
+                cur.execute("""
+                    SELECT b24_field, value_id, value_title FROM b24_field_enum
+                    WHERE entity_key = %s AND b24_field = ANY(%s)
+                """, (entity_key, b24_fields))
             for row in cur.fetchall() or []:
                 fld = row.get("b24_field")
                 vid = row.get("value_id")
@@ -508,6 +516,13 @@ def _enum_value_to_title(val: Any, field_enum_map: Dict[Tuple[str, str], str], b
         return field_enum_map[(b24_field, key_id)]
     if (b24_field, s) in field_enum_map:
         return field_enum_map[(b24_field, s)]
+    # На случай если в БД value пришёл числом (126), а в мапе ключ строкой "126"
+    try:
+        n = int(key_id)
+        if (b24_field, str(n)) in field_enum_map:
+            return field_enum_map[(b24_field, str(n))]
+    except (TypeError, ValueError):
+        pass
     return val
 
 
@@ -605,6 +620,45 @@ def _decode_record(
                 decoded = _enum_value_to_title(val, field_enum_map, b24_f)
                 if decoded is not val:
                     record[title] = decoded
+
+
+@router.get("/debug-enum")
+def debug_entity_enum(
+    entity_key: str = Query(..., description="Например sp:1114 или deal"),
+) -> Dict[str, Any]:
+    """
+    Отладка: сколько enum-значений в БД для сущности и пример маппинга колонка -> b24_field.
+    Вызов: GET /api/entity-meta-data/debug-enum?entity_key=sp:1114
+    """
+    conn = pg_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT b24_field, value_id, value_title FROM b24_field_enum WHERE entity_key = %s LIMIT 50",
+                (entity_key,),
+            )
+            enum_rows = cur.fetchall() or []
+        col_to_b24 = _load_col_to_b24_field(conn, entity_key)
+        # Найти колонки, похожие на Transmisie/Tractiune (по b24_title в meta)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT column_name, b24_field, b24_title FROM b24_meta_fields WHERE entity_key = %s",
+                (entity_key,),
+            )
+            meta_rows = cur.fetchall() or []
+        return {
+            "entity_key": entity_key,
+            "enum_count": len(enum_rows),
+            "enum_sample": [dict(r) for r in enum_rows[:20]],
+            "col_to_b24_count": len(col_to_b24),
+            "col_to_b24_sample": dict(list(col_to_b24.items())[:15]),
+            "meta_fields_sample": [{"column_name": r.get("column_name"), "b24_field": r.get("b24_field"), "b24_title": r.get("b24_title")} for r in meta_rows[:20]],
+        }
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 @router.get("/")

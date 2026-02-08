@@ -1240,8 +1240,14 @@ def _userfield_items_to_enum_rows(entity_key: str, field_name: str, items: List[
     for opt in items or []:
         if not isinstance(opt, dict):
             continue
-        vid = opt.get("ID") or opt.get("id") or opt.get("VALUE") or opt.get("value")
-        title = opt.get("VALUE") or opt.get("value") or opt.get("NAME") or opt.get("name") or opt.get("TITLE") or opt.get("title")
+        vid = (
+            opt.get("ID") or opt.get("id") or opt.get("STATUS_ID") or opt.get("statusId")
+            or opt.get("VALUE") or opt.get("value")
+        )
+        title = (
+            opt.get("VALUE") or opt.get("value") or opt.get("NAME") or opt.get("name")
+            or opt.get("TITLE") or opt.get("title")
+        )
         if vid is None or (isinstance(vid, str) and not vid.strip()):
             continue
         if title is None:
@@ -1255,58 +1261,173 @@ def sync_field_enums(conn, entity_key: str) -> Tuple[int, List[str]]:
     debug_notes: List[str] = []
     if entity_key == "deal":
         method = "crm.deal.userfield.list"
+        use_smart_api = False
     elif entity_key == "contact":
         method = "crm.contact.userfield.list"
+        use_smart_api = False
     elif entity_key == "lead":
         method = "crm.lead.userfield.list"
+        use_smart_api = False
     elif entity_key == "company":
         method = "crm.company.userfield.list"
+        use_smart_api = False
+    elif entity_key and entity_key.startswith("sp:"):
+        use_smart_api = True
+        try:
+            etid = int(entity_key.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return 0, []
+        method = None
     else:
         return 0, []
     try:
-        data = b24.call(method, {})
-        result = data.get("result")
-        if not result:
-            debug_notes.append(f"{entity_key} userfield.list: result empty")
-            return 0, debug_notes
         field_list: List[Tuple[str, Dict[str, Any]]] = []
-        if isinstance(result, list):
-            for uf in result:
-                if isinstance(uf, dict):
-                    fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
-                    if fn:
-                        field_list.append((fn, uf))
-            debug_notes.append(f"{entity_key}: result is list, {len(field_list)} fields")
-        elif isinstance(result, dict):
-            if result.get("userFields") and isinstance(result["userFields"], list):
-                for uf in result["userFields"]:
+        if use_smart_api:
+            fields = fetch_smart_fields(etid)
+            if isinstance(fields, dict):
+                field_list = [(str(fn), uf) for fn, uf in fields.items() if fn and isinstance(uf, dict)]
+            debug_notes.append(f"{entity_key}: crm.item.fields, {len(field_list)} fields")
+        else:
+            data = b24.call(method, {})
+            result = data.get("result")
+            if not result:
+                debug_notes.append(f"{entity_key} userfield.list: result empty")
+                return 0, debug_notes
+            if isinstance(result, list):
+                for uf in result:
                     if isinstance(uf, dict):
                         fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
                         if fn:
                             field_list.append((fn, uf))
-            elif result.get("fields") and isinstance(result["fields"], dict):
-                for fn, uf in result["fields"].items():
-                    if isinstance(uf, dict) and fn:
-                        field_list.append((str(fn), uf))
-            elif result.get("fields") and isinstance(result["fields"], list):
-                for uf in result["fields"]:
-                    if isinstance(uf, dict):
-                        fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
-                        if fn:
-                            field_list.append((fn, uf))
-            else:
-                for fn, uf in result.items():
-                    if isinstance(uf, dict) and fn and not fn.startswith("_"):
-                        field_list.append((str(fn), uf))
-            debug_notes.append(f"{entity_key}: result is dict, {len(field_list)} fields")
+                debug_notes.append(f"{entity_key}: result is list, {len(field_list)} fields")
+            elif isinstance(result, dict):
+                if result.get("userFields") and isinstance(result["userFields"], list):
+                    for uf in result["userFields"]:
+                        if isinstance(uf, dict):
+                            fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                            if fn:
+                                field_list.append((fn, uf))
+                elif result.get("fields") and isinstance(result["fields"], dict):
+                    for fn, uf in result["fields"].items():
+                        if isinstance(uf, dict) and fn:
+                            field_list.append((str(fn), uf))
+                elif result.get("fields") and isinstance(result["fields"], list):
+                    for uf in result["fields"]:
+                        if isinstance(uf, dict):
+                            fn = uf.get("fieldName") or uf.get("FIELD_NAME") or uf.get("field_name") or uf.get("field")
+                            if fn:
+                                field_list.append((fn, uf))
+                else:
+                    for fn, uf in result.items():
+                        if isinstance(uf, dict) and fn and not fn.startswith("_"):
+                            field_list.append((str(fn), uf))
+                debug_notes.append(f"{entity_key}: result is dict, {len(field_list)} fields")
         all_rows = []
         fields_with_items = 0
         for field_name, uf in field_list:
-            raw_items = uf.get("items") or uf.get("values") or uf.get("ENUM") or uf.get("LIST") or uf.get("list") or []
+            raw_items = (
+                uf.get("items") or uf.get("values") or uf.get("options") or uf.get("option")
+                or uf.get("ENUM") or uf.get("LIST") or uf.get("list") or []
+            )
+            if not raw_items and isinstance(uf.get("settings"), dict):
+                raw_items = uf["settings"].get("items") or uf["settings"].get("options") or uf["settings"].get("list") or []
             if isinstance(raw_items, dict):
-                items = raw_items.get("items") or raw_items.get("values") or list(raw_items.values())
+                inner = raw_items.get("items") or raw_items.get("values")
+                if inner is not None and isinstance(inner, list):
+                    items = inner
+                else:
+                    # Bitrix crm.item.fields часто возвращает items как { "id": "title", ... } или { "id": { "VALUE": "..." }, ... }
+                    def _title_from(v: Any) -> str:
+                        if isinstance(v, str):
+                            return v
+                        if isinstance(v, dict):
+                            return str(v.get("VALUE") or v.get("NAME") or v.get("title") or v.get("TITLE") or v)
+                        return str(v)
+                    items = [{"ID": k, "VALUE": _title_from(v)} for k, v in raw_items.items() if str(k).strip() != ""]
             else:
                 items = raw_items if isinstance(raw_items, list) else []
+            if not items and use_smart_api:
+                # Списочные поля смарт-процесса часто хранят entityId в settings — варианты через crm.status.entity.items.
+                # Пробуем для любого поля (Transmisie, Tractiune, Filiala и т.д. могут не иметь type=list в ответе).
+                settings = uf.get("settings") or {}
+                if isinstance(settings, dict):
+                    eid = (
+                        settings.get("entityId") or settings.get("ENTITY_ID")
+                        or settings.get("listEntityId") or settings.get("LIST_ENTITY_ID")
+                        or uf.get("entityId") or uf.get("listEntityId")
+                    )
+                    if eid:
+                        try:
+                            st_data = b24.call("crm.status.entity.items", {"entityId": str(eid).strip()})
+                            st_res = st_data.get("result")
+                            if isinstance(st_res, list):
+                                st_list = st_res
+                            elif isinstance(st_res, dict):
+                                st_list = st_res.get("items") or st_res.get("result") or []
+                            else:
+                                st_list = []
+                            if isinstance(st_list, list) and st_list:
+                                items = []
+                                for st in st_list:
+                                    if isinstance(st, dict):
+                                        sid = st.get("ID") or st.get("id") or st.get("STATUS_ID") or st.get("statusId")
+                                        name = st.get("VALUE") or st.get("value") or st.get("NAME") or st.get("name") or st.get("TITLE")
+                                        if sid is not None:
+                                            items.append({"ID": str(sid), "VALUE": str(name or sid).strip()})
+                                    elif st is not None:
+                                        items.append({"ID": str(st), "VALUE": str(st)})
+                                if items:
+                                    debug_notes.append(f"{entity_key}: {field_name} from status.entity.items entityId={eid} ({len(items)} items)")
+                                    print(f"INFO: sync_field_enums({entity_key}): {field_name} <- crm.status.entity.items entityId={eid} ({len(items)} values)", file=sys.stderr, flush=True)
+                            else:
+                                print(f"INFO: sync_field_enums({entity_key}): {field_name} entityId={eid} -> empty result", file=sys.stderr, flush=True)
+                        except Exception as e:
+                            debug_notes.append(f"{entity_key}: {field_name} status.entity.items: {e}")
+                            print(f"WARNING: sync_field_enums({entity_key}): {field_name} entityId={eid} -> {e}", file=sys.stderr, flush=True)
+            if not items and use_smart_api:
+                # Поля типа iblock_element (Transmisie, Tracțiune, Filiala и т.д.) — варианты в инфоблоке, в settings есть IBLOCK_ID
+                settings = uf.get("settings") or {}
+                if isinstance(settings, dict):
+                    _iblock_id = settings.get("IBLOCK_ID")
+                    if _iblock_id is not None and (uf.get("type") or "").strip().lower() == "iblock_element":
+                        try:
+                            iblock_id = int(_iblock_id)
+                            # Пробуем lists.element.get (REST Bitrix24 — элементы списка по IBLOCK_ID)
+                            el_data = b24.call("lists.element.get", {"IBLOCK_TYPE_ID": "lists", "IBLOCK_ID": iblock_id})
+                            el_res = el_data.get("result")
+                            if isinstance(el_res, list) and el_res:
+                                items = []
+                                for el in el_res:
+                                    if isinstance(el, dict):
+                                        eid = el.get("ID") or el.get("id") or el.get("ELEMENT_ID")
+                                        name = el.get("NAME") or el.get("name") or el.get("VALUE") or el.get("title")
+                                        if eid is not None:
+                                            items.append({"ID": str(eid), "VALUE": str(name or eid).strip()})
+                                    elif el is not None:
+                                        items.append({"ID": str(el), "VALUE": str(el)})
+                                if items:
+                                    debug_notes.append(f"{entity_key}: {field_name} from lists.element.get IBLOCK_ID={iblock_id} ({len(items)} items)")
+                                    print(f"INFO: sync_field_enums({entity_key}): {field_name} <- lists.element.get IBLOCK_ID={iblock_id} ({len(items)} values)", file=sys.stderr, flush=True)
+                            elif isinstance(el_res, dict):
+                                el_list = el_res.get("elements") or el_res.get("items") or el_res.get("result") or []
+                                if isinstance(el_list, list) and el_list:
+                                    items = []
+                                    for el in el_list:
+                                        if isinstance(el, dict):
+                                            eid = el.get("ID") or el.get("id") or el.get("ELEMENT_ID")
+                                            name = el.get("NAME") or el.get("name") or el.get("VALUE") or el.get("title")
+                                            if eid is not None:
+                                                items.append({"ID": str(eid), "VALUE": str(name or eid).strip()})
+                                        elif el is not None:
+                                            items.append({"ID": str(el), "VALUE": str(el)})
+                                    if items:
+                                        debug_notes.append(f"{entity_key}: {field_name} from lists.element.get IBLOCK_ID={iblock_id} ({len(items)} items)")
+                                        print(f"INFO: sync_field_enums({entity_key}): {field_name} <- lists.element.get IBLOCK_ID={iblock_id} ({len(items)} values)", file=sys.stderr, flush=True)
+                            if not items:
+                                print(f"INFO: sync_field_enums({entity_key}): {field_name} IBLOCK_ID={_iblock_id} -> empty or unsupported format", file=sys.stderr, flush=True)
+                        except Exception as e:
+                            debug_notes.append(f"{entity_key}: {field_name} lists.element.get: {e}")
+                            print(f"WARNING: sync_field_enums({entity_key}): {field_name} IBLOCK_ID={_iblock_id} -> {e}", file=sys.stderr, flush=True)
             if not items:
                 continue
             fields_with_items += 1
@@ -1727,8 +1848,13 @@ def fetch_smart_process_types() -> List[Dict[str, Any]]:
     return []
 
 def fetch_smart_fields(entity_type_id: int) -> Dict[str, Any]:
+    """Поля смарт-процесса. Bitrix может вернуть result.fields или result = { fieldName: meta }."""
     data = b24.call("crm.item.fields", {"entityTypeId": entity_type_id})
-    return data.get("result", {}).get("fields", {})
+    res = data.get("result")
+    if not isinstance(res, dict):
+        return {}
+    # Часто result = { "fields": { "ufCrm...": {...} } }, иногда result сам по себе — словарь полей
+    return res.get("fields") if "fields" in res else res
 
 # -----------------------------
 # Bitrix list data (for insert)
@@ -3233,6 +3359,47 @@ def on_startup():
 # -----------------------------
 # API endpoints
 # -----------------------------
+@app.get("/debug/smart-fields")
+def debug_smart_fields(
+    entity_type_id: int = Query(..., description="entityTypeId смарт-процесса, например 1114"),
+):
+    """
+    Отладка: сырая структура полей из crm.item.fields для смарт-процесса.
+    Возвращает поля, у которых есть settings или type list/enum — чтобы увидеть entityId и items.
+    Вызов: GET /debug/smart-fields?entity_type_id=1114
+    """
+    try:
+        fields = fetch_smart_fields(entity_type_id)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "entity_type_id": entity_type_id}
+    if not isinstance(fields, dict):
+        return {"ok": True, "entity_type_id": entity_type_id, "fields_raw_type": type(fields).__name__, "fields_count": 0}
+    # Интересуют поля: Transmisie, Tracțiune, Filiala и любые с type list/enum или с settings
+    target_keys = {"ufCrm34_1748348015", "ufCrm34_1748431272", "ufCrm34_1748431413"}
+    target_titles = ("transmisie", "tracțiune", "tractiune", "filiala", "tipul de combustibil")
+    out = {}
+    for fn, meta in fields.items():
+        if not isinstance(meta, dict):
+            continue
+        title = (meta.get("title") or meta.get("formLabel") or meta.get("listLabel") or meta.get("b24_title") or "").lower()
+        is_target = fn in target_keys or any(t in title for t in target_titles)
+        has_settings = bool(meta.get("settings"))
+        ftype = (meta.get("type") or "").lower()
+        is_list_type = "list" in ftype or "enum" in ftype
+        if not (is_target or has_settings or is_list_type):
+            continue
+        out[fn] = {
+            "type": meta.get("type"),
+            "title": meta.get("title") or meta.get("formLabel") or meta.get("listLabel"),
+            "settings": meta.get("settings"),
+            "entityId_from_settings": (meta.get("settings") or {}).get("entityId") if isinstance(meta.get("settings"), dict) else None,
+            "listEntityId": (meta.get("settings") or {}).get("listEntityId") if isinstance(meta.get("settings"), dict) else None,
+            "has_items": "items" in meta and bool(meta.get("items")),
+            "items_keys": list(meta.get("items", {}).keys())[:10] if isinstance(meta.get("items"), dict) else (len(meta.get("items")) if isinstance(meta.get("items"), list) else None),
+        }
+    return {"ok": True, "entity_type_id": entity_type_id, "fields_count": len(fields), "relevant": out}
+
+
 @app.get("/health")
 def health():
     return {
@@ -3394,6 +3561,10 @@ def run_sync_reference_data() -> None:
         sync_field_enums(conn, "contact")
         sync_field_enums(conn, "lead")
         sync_field_enums(conn, "company")
+        with conn.cursor() as cur:
+            cur.execute("SELECT entity_key FROM b24_meta_entities WHERE entity_key LIKE 'sp:%'")
+            for row in cur.fetchall():
+                sync_field_enums(conn, row[0])
         sync_userfield_titles(conn, "deal")
         sync_userfield_titles(conn, "contact")
         sync_userfield_titles(conn, "lead")
@@ -3436,6 +3607,10 @@ def sync_reference_data_endpoint(debug: Optional[str] = Query(None, description=
         sync_field_enums(conn, "contact")
         sync_field_enums(conn, "lead")
         sync_field_enums(conn, "company")
+        with conn.cursor() as cur:
+            cur.execute("SELECT entity_key FROM b24_meta_entities WHERE entity_key LIKE 'sp:%'")
+            for row in cur.fetchall():
+                sync_field_enums(conn, row[0])
         titles_deal = sync_userfield_titles(conn, "deal")
         titles_contact = sync_userfield_titles(conn, "contact")
         titles_lead = sync_userfield_titles(conn, "lead")
