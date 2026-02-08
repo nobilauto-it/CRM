@@ -237,13 +237,23 @@ DEALS_FILTER_STAGE_IN_CHIRIE = os.getenv("DEALS_FILTER_STAGE_IN_CHIRIE", "în ch
 
 
 def pg_conn():
-    return psycopg2.connect(
+    conn = psycopg2.connect(
         host=PG_HOST,
         port=PG_PORT,
         dbname=PG_DB,
         user=PG_USER,
         password=PG_PASS,
     )
+    try:
+        conn.set_client_encoding("UTF8")
+    except Exception as e:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET client_encoding TO 'UTF8'")
+            conn.commit()
+        except Exception:
+            print(f"WARNING: pg_conn: could not set UTF8 encoding: {e}", file=sys.stderr, flush=True)
+    return conn
 
 
 def stock_table_name(entity_type_id: int) -> str:

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from starlette.requests import Request
 from urllib.parse import parse_qs
 import json
+import unicodedata
 import requests
 import psycopg2
 from psycopg2.extras import execute_values, Json
@@ -320,7 +321,12 @@ class BitrixClient:
                 if r.status_code != 200:
                     raise HTTPException(status_code=502, detail=f"Bitrix HTTP {r.status_code}: {r.text}")
 
-                data = r.json()
+                # Всегда декодируем ответ как UTF-8, чтобы не терять румынские диакритики (ț, ă, ș)
+                try:
+                    text = r.content.decode("utf-8", errors="replace")
+                except Exception:
+                    text = r.text or "{}"
+                data = json.loads(text)
 
                 # Bitrix error in body
                 if "error" in data:
@@ -357,9 +363,19 @@ b24 = BitrixClient(BITRIX_WEBHOOK)
 # Postgres helpers
 # -----------------------------
 def pg_conn():
-    return psycopg2.connect(
+    conn = psycopg2.connect(
         host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS
     )
+    try:
+        conn.set_client_encoding("UTF8")
+    except Exception as e:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET client_encoding TO 'UTF8'")
+            conn.commit()
+        except Exception:
+            print(f"WARNING: pg_conn: could not set UTF8 encoding: {e}", file=sys.stderr, flush=True)
+    return conn
 
 def ensure_meta_tables(conn):
     with conn.cursor() as cur:
@@ -1252,7 +1268,8 @@ def _userfield_items_to_enum_rows(entity_key: str, field_name: str, items: List[
             continue
         if title is None:
             title = str(vid)
-        rows.append((entity_key, field_name, str(vid).strip(), str(title).strip()))
+        title_clean = unicodedata.normalize("NFC", str(title).strip())
+        rows.append((entity_key, field_name, str(vid).strip(), title_clean))
     return rows
 
 
@@ -3359,6 +3376,36 @@ def on_startup():
 # -----------------------------
 # API endpoints
 # -----------------------------
+@app.get("/debug/lists-elements")
+def debug_lists_elements(
+    iblock_id: int = Query(..., description="IBLOCK_ID списка (например 34 для Tracțiune)"),
+):
+    """
+    Сырой ответ Bitrix lists.element.get — проверить, как в Bitrix записаны названия (Faa или Fața).
+    GET /debug/lists-elements?iblock_id=34
+    """
+    try:
+        data = b24.call("lists.element.get", {"IBLOCK_TYPE_ID": "lists", "IBLOCK_ID": iblock_id})
+    except Exception as e:
+        return {"ok": False, "error": str(e), "iblock_id": iblock_id}
+    result = data.get("result")
+    elements = result if isinstance(result, list) else (result.get("elements") or result.get("items") or []) if isinstance(result, dict) else []
+    if not isinstance(elements, list):
+        elements = []
+    items = []
+    for el in elements[:40]:
+        if not isinstance(el, dict):
+            continue
+        name = el.get("NAME") or el.get("name") or el.get("VALUE") or el.get("value")
+        items.append({
+            "ID": el.get("ID") or el.get("id"),
+            "NAME": name,
+            "NAME_repr": repr(name) if name is not None else None,
+            "NAME_codepoints": [ord(c) for c in str(name)[:15]] if name is not None else None,
+        })
+    return {"ok": True, "iblock_id": iblock_id, "count": len(elements), "items": items}
+
+
 @app.get("/debug/smart-fields")
 def debug_smart_fields(
     entity_type_id: int = Query(..., description="entityTypeId смарт-процесса, например 1114"),

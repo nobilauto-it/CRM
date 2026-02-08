@@ -7,6 +7,7 @@ GET /api/entity-meta-data/?type=deal&limit=10&offset=0
 GET /api/entity-meta-data/?type=smart_process&entity_key=sp:1114&limit=10&offset=0
 """
 import sys
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -431,13 +432,14 @@ def _load_deal_stages(conn) -> Dict[str, str]:
 
 
 def _load_field_enum_map(conn, entity_key: str, b24_fields: List[str]) -> Dict[Tuple[str, str], str]:
-    """(b24_field, value_id) -> value_title из b24_field_enum для указанных полей."""
+    """(b24_field, value_id) -> value_title из b24_field_enum для указанных полей.
+    Заголовки сохраняем через NFC без normalize_string, чтобы не портить диакритику (e.g. ţ)."""
     out: Dict[Tuple[str, str], str] = {}
     try:
+        with conn.cursor() as cur:
+            cur.execute("SET client_encoding TO 'UTF8'")
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if (entity_key or "").startswith("sp:"):
-                # Для смарт-процессов подгружаем все enum по сущности (без фильтра по полям),
-                # чтобы не терять расшифровку из-за расхождения имён полей.
                 cur.execute("""
                     SELECT b24_field, value_id, value_title FROM b24_field_enum
                     WHERE entity_key = %s
@@ -454,7 +456,8 @@ def _load_field_enum_map(conn, entity_key: str, b24_fields: List[str]) -> Dict[T
                 vid = row.get("value_id")
                 title = row.get("value_title")
                 if fld is not None and vid is not None:
-                    out[(str(fld), str(vid))] = normalize_string(title or str(vid))
+                    raw = title if title is not None else str(vid)
+                    out[(str(fld), str(vid))] = unicodedata.normalize("NFC", str(raw))
     except Exception:
         pass
     return out
@@ -622,6 +625,40 @@ def _decode_record(
                     record[title] = decoded
 
 
+@router.get("/debug-enum-raw")
+def debug_enum_raw_value(
+    entity_key: str = Query("sp:1114"),
+    b24_field: str = Query("ufCrm34_1748431272"),
+    value_id: str = Query("128"),
+) -> Dict[str, Any]:
+    """Что именно приходит из БД для одной записи enum (value_title)."""
+    conn = pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET client_encoding TO 'UTF8'")
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT value_title FROM b24_field_enum WHERE entity_key = %s AND b24_field = %s AND value_id = %s",
+                (entity_key, b24_field, value_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            return {"ok": True, "found": False}
+        val = row.get("value_title")
+        return {
+            "ok": True,
+            "found": True,
+            "value_title": val,
+            "repr": repr(val) if val is not None else None,
+            "codepoints": [ord(c) for c in str(val)] if val is not None else None,
+        }
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @router.get("/debug-enum")
 def debug_entity_enum(
     entity_key: str = Query(..., description="Например sp:1114 или deal"),
@@ -705,6 +742,8 @@ def get_entity_meta_data(
     table_name = table_name_for_entity(final_entity_key)
     conn = pg_conn()
     try:
+        with conn.cursor() as cur:
+            cur.execute("SET client_encoding TO 'UTF8'")
         col_to_title = _col_to_human_title_map(conn, final_entity_key)
         if not col_to_title:
             return {

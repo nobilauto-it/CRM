@@ -6,6 +6,7 @@ GET /api/entity-meta-fields/?type=smart_process&entity_key=sp:1114
 import os
 import re
 import sys
+import unicodedata
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 
@@ -33,9 +34,12 @@ def table_name_for_entity(entity_key: str) -> str:
         raise ValueError(f"Unknown entity_key: {entity_key}")
 
 
-# Румынские и кириллические буквы — валидные, не трогать при «исправлении» кодировки
+# Румынские и кириллические буквы — валидные, не трогать при «исправлении» кодировки.
+# Румынские: и с запятой снизу (ȘȚ), и с седилью (ŞŢ) — Bitrix/БД могут отдавать любой вариант.
 _ALLOWED_EXTENDED = (
-    "ĂăÂâÎîȘșȚț"  # румынские
+    "ĂăÂâÎî"
+    "ȘșȚț"   # S/T с запятой снизу (Unicode ș, ț)
+    "ŞşŢţ"   # S/T с седилью (часто в Windows-1250 / старых данных)
     "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя"
 )
 
@@ -46,29 +50,29 @@ def _count_weird_extended(s: str) -> int:
 
 
 def normalize_string(value: Any) -> str:
-    """Нормализует строку; исправляет double-encoded UTF-8, не ломая румынские/кириллические буквы."""
+    """Нормализует строку; сохраняет румынские/кириллические диакритики, приводит к NFC."""
     if value is None:
         return ""
     if isinstance(value, bytes):
         try:
-            return value.decode("utf-8")
+            s = value.decode("utf-8")
         except UnicodeDecodeError:
             try:
-                return value.decode("latin-1").encode("latin-1").decode("utf-8", errors="ignore")
+                s = value.decode("latin-1").encode("latin-1").decode("utf-8", errors="ignore")
             except Exception:
-                return value.decode("utf-8", errors="ignore")
+                s = value.decode("utf-8", errors="ignore")
+        return unicodedata.normalize("NFC", s)
     if isinstance(value, str):
         try:
             check_str = value[:500] if len(value) > 500 else value
             if any(ord(c) > 127 for c in check_str):
-                # Перекодировка может убить ț, ș и т.д. — применяем только если результат лучше
                 fixed = value.encode("latin-1", errors="ignore").decode("utf-8", errors="ignore")
                 if _count_weird_extended(fixed) < _count_weird_extended(value):
-                    return fixed
+                    return unicodedata.normalize("NFC", fixed)
         except Exception:
             pass
-        return value
-    return str(value)
+        return unicodedata.normalize("NFC", value)
+    return unicodedata.normalize("NFC", str(value))
 
 
 def _label_to_str(val: Any) -> str:
