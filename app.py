@@ -56,6 +56,12 @@ BITRIX_MIN_REQUEST_INTERVAL_SEC = float(os.getenv("BITRIX_MIN_REQUEST_INTERVAL_S
 BITRIX_MAX_RETRIES = int(os.getenv("BITRIX_MAX_RETRIES", "8"))
 BITRIX_BACKOFF_BASE_SEC = float(os.getenv("BITRIX_BACKOFF_BASE_SEC", "0.7"))
 
+# Ежедневная отправка 7 PDF-отчётов в 23:55 (Telegram + Bitrix)
+REPORT_CRON_BASE_URL = os.getenv("REPORT_CRON_BASE_URL", "http://127.0.0.1:7070").strip().rstrip("/")
+REPORT_CRON_TIME_HOUR = int(os.getenv("REPORT_CRON_HOUR", "23"))
+REPORT_CRON_TIME_MINUTE = int(os.getenv("REPORT_CRON_MINUTE", "55"))
+REPORT_CRON_TZ = os.getenv("REPORT_TZ", "Europe/Chisinau").strip() or "Europe/Chisinau"
+
 # =====================================================================
 # PDF HELPERS: "6 PDF по филиалам", и ВНУТРИ КАЖДОГО PDF — РАЗБИВКА ТАБЛИЦ
 # =====================================================================
@@ -3341,8 +3347,61 @@ async def b24_dynamic_item_update(request: Request):
         return {"ok": False}
 
 
+def _daily_reports_cron_thread():
+    """В 23:55 по Europe/Chisinau вызывает отправку 7 отчётов (Telegram + Bitrix)."""
+    last_run_date = None
+    check_interval_sec = 60
+    while True:
+        try:
+            now_local = datetime.now(ZoneInfo(REPORT_CRON_TZ))
+            if (
+                now_local.hour == REPORT_CRON_TIME_HOUR
+                and now_local.minute >= REPORT_CRON_TIME_MINUTE
+                and (last_run_date is None or last_run_date < now_local.date())
+            ):
+                url = f"{REPORT_CRON_BASE_URL}/api/data/reports/stock_auto/pdf/send"
+                print(
+                    f"REPORT CRON: triggering send at {now_local.isoformat()} -> POST {url}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                try:
+                    r = requests.post(url, timeout=600)
+                    if r.status_code == 200:
+                        print(
+                            f"REPORT CRON: sent 7 reports to Telegram + Bitrix successfully",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"REPORT CRON: POST failed status={r.status_code} body={r.text[:300]}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                except Exception as e:
+                    print(
+                        f"REPORT CRON: request failed: {e}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                last_run_date = now_local.date()
+        except Exception as e:
+            print(f"REPORT CRON: error: {e}", file=sys.stderr, flush=True)
+        time.sleep(check_interval_sec)
+
+
 @app.on_event("startup")
 def on_startup():
+
+    # Ежедневная отправка отчётов в 23:55 (те же 7 PDF в Telegram и в Bitrix)
+    report_cron_thread = threading.Thread(target=_daily_reports_cron_thread, daemon=True)
+    report_cron_thread.start()
+    print(
+        f"REPORT CRON: daily send at {REPORT_CRON_TIME_HOUR}:{REPORT_CRON_TIME_MINUTE:02d} {REPORT_CRON_TZ} -> Telegram + Bitrix",
+        file=sys.stderr,
+        flush=True,
+    )
 
     # WEBHOOK ONLY: do not poll Bitrix, process only outbound events
     if WEBHOOK_ONLY:

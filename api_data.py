@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 import sys
@@ -94,8 +95,14 @@ TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
 BITRIX_WEBHOOK = os.getenv(
     "BITRIX_WEBHOOK",
-    "https://nobilauto.bitrix24.ru/rest/18397/k3gp4gc75esvw3xv",
+    "https://nobilauto.bitrix24.ru/rest/18397/h5c7kw97sfp3uote",
 ).strip()
+# Отдельный webhook и чат для отправки PDF в Bitrix от system.notifications@nobilauto.md
+BITRIX_WEBHOOK_REPORTS = os.getenv(
+    "BITRIX_WEBHOOK_REPORTS",
+    "https://nobilauto.bitrix24.ru/rest/20532/grmoroz08bush0kp",
+).strip()
+BITRIX_REPORT_CHAT_ID = os.getenv("BITRIX_REPORT_CHAT_ID", "136188").strip()
 
 # отчетный timezone (чтобы "сегодня" было по Молдове, а не UTC)
 REPORT_TZ = os.getenv("REPORT_TZ", "Europe/Chisinau").strip() or "Europe/Chisinau"
@@ -4704,11 +4711,15 @@ def _generate_pdf_stock_auto_split_weasyprint(
         raise
 
 
-# ---------------- Telegram ----------------
+# ---------------- Telegram / Bitrix ----------------
 def send_pdf_to_telegram(pdf_bytes: bytes, filename: str, caption: str) -> Dict[str, Any]:
     try:
-        print(f"DEBUG: send_pdf_to_telegram: Starting - filename={filename}, pdf_size={len(pdf_bytes)} bytes", file=sys.stderr, flush=True)
-        
+        print(
+            f"DEBUG: send_pdf_to_telegram: Starting - filename={filename}, pdf_size={len(pdf_bytes)} bytes",
+            file=sys.stderr,
+            flush=True,
+        )
+
         if not TG_TOKEN:
             error_msg = "TG_TOKEN is empty (set env TG_TOKEN)"
             print(f"ERROR: send_pdf_to_telegram: {error_msg}", file=sys.stderr, flush=True)
@@ -4722,26 +4733,254 @@ def send_pdf_to_telegram(pdf_bytes: bytes, filename: str, caption: str) -> Dict[
         files = {"document": (filename, pdf_bytes, "application/pdf")}
         data = {"chat_id": TG_CHAT_ID, "caption": caption, "parse_mode": "HTML"}
 
-        print(f"DEBUG: send_pdf_to_telegram: Sending to Telegram API...", file=sys.stderr, flush=True)
+        print("DEBUG: send_pdf_to_telegram: Sending to Telegram API...", file=sys.stderr, flush=True)
         r = requests.post(url, files=files, data=data, timeout=60)
-        print(f"DEBUG: send_pdf_to_telegram: Telegram API response status={r.status_code}", file=sys.stderr, flush=True)
-        
+        print(
+            f"DEBUG: send_pdf_to_telegram: Telegram API response status={r.status_code}",
+            file=sys.stderr,
+            flush=True,
+        )
+
         r.raise_for_status()
         result = r.json()
-        print(f"DEBUG: send_pdf_to_telegram: Successfully sent PDF '{filename}' to Telegram", file=sys.stderr, flush=True)
+        print(
+            f"DEBUG: send_pdf_to_telegram: Successfully sent PDF '{filename}' to Telegram",
+            file=sys.stderr,
+            flush=True,
+        )
         return result
     except requests.exceptions.RequestException as e:
         error_msg = f"Telegram API request failed: {e}"
         print(f"ERROR: send_pdf_to_telegram: {error_msg}", file=sys.stderr, flush=True)
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"ERROR: send_pdf_to_telegram: Response status={e.response.status_code}, body={e.response.text[:500]}", file=sys.stderr, flush=True)
+        if hasattr(e, "response") and e.response is not None:
+            print(
+                f"ERROR: send_pdf_to_telegram: Response status={e.response.status_code}, body={e.response.text[:500]}",
+                file=sys.stderr,
+                flush=True,
+            )
         raise
     except Exception as e:
         error_msg = f"Unexpected error in send_pdf_to_telegram: {e}"
         print(f"ERROR: send_pdf_to_telegram: {error_msg}", file=sys.stderr, flush=True)
         import traceback
+
         print(f"ERROR: send_pdf_to_telegram: Traceback:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
         raise
+
+
+def _bitrix_reports_webhook() -> str:
+    """
+    Возвращает webhook для отправки PDF в Bitrix (system.notifications@nobilauto.md).
+    Можно переопределить через BITRIX_WEBHOOK_REPORTS, иначе используется BITRIX_WEBHOOK.
+    """
+    if BITRIX_WEBHOOK_REPORTS:
+        return BITRIX_WEBHOOK_REPORTS
+    return BITRIX_WEBHOOK
+
+
+def _caption_html_to_bitrix_bb(caption: str) -> str:
+    """Конвертирует caption из HTML (Telegram) в BB-коды Bitrix: [B]...[/B] для жирного."""
+    if not caption:
+        return ""
+    s = caption.replace("</b>", "[/B]").replace("<b>", "[B]")
+    s = s.replace("</i>", "[/I]").replace("<i>", "[I]")
+    # убираем оставшиеся HTML-теги
+    s = re.sub(r"<[^>]+>", "", s)
+    return s.strip()
+
+
+def send_pdf_to_bitrix(pdf_bytes: bytes, filename: str, caption: str) -> Dict[str, Any]:
+    """
+    Отправляет PDF в чат Bitrix по webhook:
+    0) Разделитель (полоска с названием филиала), чтобы было видно, какой PDF к какому отчёту
+    1) Получаем папку диска для диалога (im.disk.folder.get)
+    2) Загружаем файл в эту папку (disk.folder.uploadfile)
+    3) Коммитим файл в чат (im.disk.file.commit)
+    4) Отправляем текст превью отдельным сообщением (im.message.add) — как в Telegram под файлом
+    """
+    try:
+        webhook = _bitrix_reports_webhook()
+        if not webhook:
+            raise RuntimeError("BITRIX_WEBHOOK_REPORTS/BITRIX_WEBHOOK is empty")
+
+        chat_id_raw = BITRIX_REPORT_CHAT_ID or "136188"
+        dialog_id = chat_id_raw if str(chat_id_raw).startswith("chat") else f"chat{chat_id_raw}"
+
+        print(
+            f"DEBUG: send_pdf_to_bitrix: Starting - dialog_id={dialog_id}, filename={filename}, pdf_size={len(pdf_bytes)} bytes",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        # 1) Получаем папку диска чата
+        folder_url = f"{webhook.rstrip('/')}/im.disk.folder.get.json"
+        folder_params = {"DIALOG_ID": dialog_id}
+        folder_resp = requests.post(folder_url, json=folder_params, timeout=30)
+        folder_resp.raise_for_status()
+        folder_data = folder_resp.json()
+        folder_result = folder_data.get("result") or {}
+        folder_id = str(folder_result.get("ID") or folder_result.get("id") or "").strip()
+        if not folder_id:
+            raise RuntimeError(f"im.disk.folder.get returned no folder ID: {folder_data}")
+
+        print(
+            f"DEBUG: send_pdf_to_bitrix: Got folder_id={folder_id} for dialog_id={dialog_id}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        # 2) Запрашиваем uploadUrl (без файла), затем отправляем PDF по этому URL
+        upload_method_url = f"{webhook.rstrip('/')}/disk.folder.uploadfile.json"
+        # Шаг 2a: только id папки и имя файла — Bitrix вернёт uploadUrl
+        init_payload = {"id": folder_id, "NAME": filename}
+        init_resp = requests.post(upload_method_url, json=init_payload, timeout=30)
+        init_resp.raise_for_status()
+        init_json = init_resp.json()
+        init_result = init_json.get("result") or {}
+        upload_url_to_use = (init_result.get("uploadUrl") or init_result.get("upload_url") or "").strip()
+        field_name = (init_result.get("field") or "file").strip() or "file"
+        if not upload_url_to_use:
+            raise RuntimeError(f"disk.folder.uploadfile did not return uploadUrl: {init_json}")
+
+        print(
+            f"DEBUG: send_pdf_to_bitrix: POSTing file to uploadUrl, field={field_name}",
+            file=sys.stderr,
+            flush=True,
+        )
+        # Шаг 2b: отправляем файл на uploadUrl (multipart)
+        step2_resp = requests.post(
+            upload_url_to_use,
+            files={field_name: (filename, pdf_bytes, "application/pdf")},
+            timeout=60,
+        )
+        step2_resp.raise_for_status()
+        step2_content_type = (step2_resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+        step2_json = step2_resp.json() if "application/json" in step2_content_type else {}
+        step2_result = step2_json.get("result")
+        if isinstance(step2_result, dict):
+            file_id = str(step2_result.get("ID") or step2_result.get("id") or "").strip()
+        else:
+            file_id = str(step2_json.get("ID") or step2_json.get("id") or "").strip() if isinstance(step2_json, dict) else ""
+        if not file_id and isinstance(step2_json, dict):
+            file_id = str(step2_json.get("result", {}).get("ID") or step2_json.get("result", {}).get("id") or "").strip()
+        if not file_id:
+            raise RuntimeError(f"Upload to uploadUrl returned no file ID: {step2_resp.text[:500]}")
+
+        print(
+            f"DEBUG: send_pdf_to_bitrix: Uploaded file_id={file_id} to folder_id={folder_id}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        # 3) Коммитим файл в чат (отображение в диалоге)
+        commit_url = f"{webhook.rstrip('/')}/im.disk.file.commit.json"
+        commit_params: Dict[str, Any] = {
+            "CHAT_ID": int(chat_id_raw) if str(chat_id_raw).isdigit() else chat_id_raw,
+            "FILE_ID": file_id,
+        }
+        if caption:
+            commit_params["COMMENT"] = caption
+
+        commit_resp = requests.post(commit_url, json=commit_params, timeout=30)
+        commit_resp.raise_for_status()
+        commit_json = commit_resp.json()
+
+        print(
+            f"DEBUG: send_pdf_to_bitrix: Successfully committed file_id={file_id} to CHAT_ID={chat_id_raw}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        # 4) Превью: текст под файлом, в конце — полоска после строки Încărcare filială (разделитель перед следующим PDF)
+        if caption:
+            msg_text = _caption_html_to_bitrix_bb(caption)
+            if msg_text:
+                msg_text = msg_text + "\n─────────────────────────"
+                msg_url = f"{webhook.rstrip('/')}/im.message.add.json"
+                msg_params = {"DIALOG_ID": dialog_id, "MESSAGE": msg_text}
+                try:
+                    msg_resp = requests.post(msg_url, json=msg_params, timeout=15)
+                    msg_resp.raise_for_status()
+                    print(
+                        f"DEBUG: send_pdf_to_bitrix: Preview message sent (im.message.add)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except Exception as msg_err:
+                    print(
+                        f"WARNING: send_pdf_to_bitrix: im.message.add failed (preview text): {msg_err}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+        return {
+            "ok": True,
+            "folder_id": folder_id,
+            "file_id": file_id,
+            "commit": commit_json,
+        }
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Bitrix REST request failed: {e}"
+        print(f"ERROR: send_pdf_to_bitrix: {error_msg}", file=sys.stderr, flush=True)
+        if hasattr(e, "response") and e.response is not None:
+            try:
+                body = e.response.text[:500]
+            except Exception:
+                body = "<no body>"
+            print(
+                f"ERROR: send_pdf_to_bitrix: Response status={e.response.status_code}, body={body}",
+                file=sys.stderr,
+                flush=True,
+            )
+        raise
+    except Exception as e:
+        error_msg = f"Unexpected error in send_pdf_to_bitrix: {e}"
+        print(f"ERROR: send_pdf_to_bitrix: {error_msg}", file=sys.stderr, flush=True)
+        import traceback
+
+        print(f"ERROR: send_pdf_to_bitrix: Traceback:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
+        raise
+
+
+def _generate_test_pdf_bytes() -> bytes:
+    """Минимальный одностраничный PDF для теста отправки в Bitrix."""
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("Test PDF for Bitrix", styles["Title"]),
+        Spacer(1, 20),
+        Paragraph(
+            f"Generated at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC. "
+            "If you see this in the chat, Bitrix integration works.",
+            styles["Normal"],
+        ),
+    ]
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
+@router.get("/reports/stock_auto/pdf/test-send-bitrix")
+def test_send_pdf_to_bitrix() -> Dict[str, Any]:
+    """
+    Тестовый эндпоинт: генерирует один небольшой PDF и отправляет его в чат Bitrix
+    (BITRIX_REPORT_CHAT_ID). Вызови в браузере: GET /api/data/reports/stock_auto/pdf/test-send-bitrix
+    """
+    try:
+        pdf_bytes = _generate_test_pdf_bytes()
+        filename = f"test_bitrix_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.pdf"
+        caption = "Test PDF — проверка отправки отчётов в Bitrix"
+        result = send_pdf_to_bitrix(pdf_bytes, filename=filename, caption=caption)
+        return {
+            "ok": True,
+            "message": "Test PDF sent to Bitrix chat",
+            "chat_id": BITRIX_REPORT_CHAT_ID,
+            "filename": filename,
+            "bitrix_result": result,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------- API ----------------
@@ -5473,18 +5712,47 @@ def send_stock_auto_reports_filtered(
         caption += f"Mașini prelungite - <b>{deals_prelungire_count}</b>\n\n"
         caption += f"Încărcare filială - <b>{loading_percent}%</b> (În chirie - <b>{chirie_count}</b> auto)"
 
-        print(f"DEBUG: send_stock_auto_reports_filtered: About to send PDF to Telegram - filename={filename}, pdf_size={len(pdf)} bytes", file=sys.stderr, flush=True)
-        print(f"DEBUG: send_stock_auto_reports_filtered: Caption length={len(caption)} chars", file=sys.stderr, flush=True)
-        
+        print(
+            f"DEBUG: send_stock_auto_reports_filtered: About to send PDF to Telegram - filename={filename}, pdf_size={len(pdf)} bytes",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            f"DEBUG: send_stock_auto_reports_filtered: Caption length={len(caption)} chars",
+            file=sys.stderr,
+            flush=True,
+        )
+
         try:
             send_pdf_to_telegram(pdf, filename=filename, caption=caption)
-            print(f"DEBUG: send_stock_auto_reports_filtered: Successfully sent PDF '{filename}' to Telegram", file=sys.stderr, flush=True)
+            print(
+                f"DEBUG: send_stock_auto_reports_filtered: Successfully sent PDF '{filename}' to Telegram",
+                file=sys.stderr,
+                flush=True,
+            )
         except Exception as telegram_error:
             error_msg = f"Failed to send PDF to Telegram: {telegram_error}"
             print(f"ERROR: send_stock_auto_reports_filtered: {error_msg}", file=sys.stderr, flush=True)
             import traceback
-            print(f"ERROR: send_stock_auto_reports_filtered: Telegram send traceback:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
+
+            print(
+                f"ERROR: send_stock_auto_reports_filtered: Telegram send traceback:\n{traceback.format_exc()}",
+                file=sys.stderr,
+                flush=True,
+            )
             raise
+
+        # Дополнительно отправляем тот же PDF в Bitrix-чат
+        try:
+            send_pdf_to_bitrix(pdf, filename=filename, caption=caption)
+            print(
+                f"DEBUG: send_stock_auto_reports_filtered: Successfully sent PDF '{filename}' to Bitrix chat",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as bitrix_error:
+            error_msg = f"Failed to send PDF to Bitrix: {bitrix_error}"
+            print(f"ERROR: send_stock_auto_reports_filtered: {error_msg}", file=sys.stderr, flush=True)
         
         return {
             "ok": True,
@@ -5510,6 +5778,28 @@ def send_stock_auto_reports_filtered(
                 conn.close()
         except Exception:
             pass
+
+
+@router.get("/reports/stock_auto/pdf/send-now")
+def trigger_daily_reports_now() -> Dict[str, Any]:
+    """
+    Тест крона: отправить 7 отчётов в Telegram и Bitrix **сейчас** (то же, что выполняется в 23:55).
+    Открой в браузере: GET /api/data/reports/stock_auto/pdf/send-now — затем проверь чат Bitrix (ID 136188).
+    """
+    base = os.getenv("REPORT_CRON_BASE_URL", "http://127.0.0.1:7070").strip().rstrip("/")
+    url = f"{base}/api/data/reports/stock_auto/pdf/send"
+    try:
+        r = requests.post(url, timeout=600)
+        ct = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+        data = r.json() if "application/json" in ct else r.text[:1000]
+        return {
+            "ok": r.status_code == 200,
+            "message": "Отправка запущена. Проверьте Telegram и чат Bitrix (ID 136188) — должно прийти 7 PDF.",
+            "status_code": r.status_code,
+            "response": data,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/reports/stock_auto/pdf/send")
@@ -6344,11 +6634,24 @@ def send_stock_auto_reports(
                             
                             send_pdf_to_telegram(pdf, filename=filename, caption=caption)
                             sent += 1
-                            results.append({
-                                "branch": display_name,
-                                "rows_total": total_auto,  # РЕАЛЬНОЕ количество
-                                "filter": str(fv),
-                            })
+                            results.append(
+                                {
+                                    "branch": display_name,
+                                    "rows_total": total_auto,  # РЕАЛЬНОЕ количество
+                                    "filter": str(fv),
+                                }
+                            )
+                            # Дополнительно отправляем тот же PDF в Bitrix-чат
+                            try:
+                                send_pdf_to_bitrix(pdf, filename=filename, caption=caption)
+                                print(
+                                    f"DEBUG: send_stock_auto_reports: Successfully sent PDF for '{display_name}' to Bitrix (filtered Centru/Ungheni)",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            except Exception as bitrix_error:
+                                error_msg = f"Failed to send filtered PDF to Bitrix for '{display_name}': {bitrix_error}"
+                                print(f"ERROR: send_stock_auto_reports: {error_msg}", file=sys.stderr, flush=True)
                             print(
                                 f"DEBUG: send_stock_auto_reports: *** {recovery_name} RECOVERY SUCCESS *** PDF with {total_auto} items sent to Telegram",
                                 file=sys.stderr,
@@ -6541,6 +6844,17 @@ def send_stock_auto_reports(
                         file=sys.stderr,
                         flush=True,
                     )
+                    # Дополнительно отправляем тот же PDF в Bitrix-чат
+                    try:
+                        send_pdf_to_bitrix(pdf, filename=filename, caption=caption)
+                        print(
+                            f"DEBUG: send_stock_auto_reports: Successfully sent PDF for '{display_name}' to Bitrix",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    except Exception as bitrix_error:
+                        error_msg = f"Failed to send PDF to Bitrix for '{display_name}': {bitrix_error}"
+                        print(f"ERROR: send_stock_auto_reports: {error_msg}", file=sys.stderr, flush=True)
                     # Особое внимание к Ungheni
                     if "ungheni" in str(display_name).lower() or str(fv) == "1670":
                         print(
@@ -6615,7 +6929,15 @@ def send_stock_auto_reports(
                         safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(display_name)).strip("_") or "branch"
                         filename = f"stock_auto_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
                         today_str = datetime.now(REPORT_TZINFO).strftime("%d.%m.%Y")
-                        caption = f"<b>{display_name}</b> - {today_str}\n\n<b>Total venit astăzi - 0 MDL</b>\n<b>Auto - 0</b>\n\nMașini date - <b>0</b>\nMașini primite - <b>0</b>\nMașini prelungite - <b>0</b>\n\nÎncărcare filială - <b>0%</b> (În chirie - <b>0</b> auto)"
+                        caption = (
+                            f"<b>{display_name}</b> - {today_str}\n\n"
+                            f"<b>Total venit astăzi - 0 MDL</b>\n"
+                            f"<b>Auto - 0</b>\n\n"
+                            f"Mașini date - <b>0</b>\n"
+                            f"Mașini primite - <b>0</b>\n"
+                            f"Mașini prelungite - <b>0</b>\n\n"
+                            f"Încărcare filială - <b>0%</b> (În chirie - <b>0</b> auto)"
+                        )
                         send_pdf_to_telegram(pdf, filename=filename, caption=caption)
                         sent += 1
                         results.append({"branch": display_name, "rows_total": 0, "filter": str(filter_value)})
@@ -6624,6 +6946,17 @@ def send_stock_auto_reports(
                             file=sys.stderr,
                             flush=True,
                         )
+                        # Дополнительно отправляем пустой PDF в Bitrix-чат
+                        try:
+                            send_pdf_to_bitrix(pdf, filename=filename, caption=caption)
+                            print(
+                                "DEBUG: send_stock_auto_reports: *** UNGHENI RECOVERY SUCCESS *** Empty PDF sent to Bitrix successfully!",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                        except Exception as bitrix_error:
+                            error_msg = f"Failed to send empty UNGHENI PDF to Bitrix: {bitrix_error}"
+                            print(f"ERROR: send_stock_auto_reports: {error_msg}", file=sys.stderr, flush=True)
                     except Exception as recovery_error:
                         print(
                             f"ERROR: send_stock_auto_reports: *** UNGHENI RECOVERY FAILED *** {str(recovery_error)}",
