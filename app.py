@@ -3348,7 +3348,7 @@ async def b24_dynamic_item_update(request: Request):
 
 
 def _daily_reports_cron_thread():
-    """В 23:55 по Europe/Chisinau вызывает отправку 7 отчётов (Telegram + Bitrix)."""
+    """В 23:55 по Europe/Chisinau вызывает отправку 7 отчётов (Telegram + Bitrix). Один раз в сутки."""
     last_run_date = None
     check_interval_sec = 60
     while True:
@@ -3359,6 +3359,8 @@ def _daily_reports_cron_thread():
                 and now_local.minute >= REPORT_CRON_TIME_MINUTE
                 and (last_run_date is None or last_run_date < now_local.date())
             ):
+                # Сразу помечаем день как «уже запускали», чтобы за 5–10 мин отправки не сработать ещё раз
+                last_run_date = now_local.date()
                 url = f"{REPORT_CRON_BASE_URL}/api/data/reports/stock_auto/pdf/send"
                 print(
                     f"REPORT CRON: triggering send at {now_local.isoformat()} -> POST {url}",
@@ -3385,7 +3387,6 @@ def _daily_reports_cron_thread():
                         file=sys.stderr,
                         flush=True,
                     )
-                last_run_date = now_local.date()
         except Exception as e:
             print(f"REPORT CRON: error: {e}", file=sys.stderr, flush=True)
         time.sleep(check_interval_sec)
