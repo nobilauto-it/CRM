@@ -280,6 +280,9 @@ app.include_router(entity_meta_fields_router)
 from entity_meta_data_api import router as entity_meta_data_router
 app.include_router(entity_meta_data_router)
 
+from Login import router as login_router
+app.include_router(login_router)
+
 # -----------------------------
 # Bitrix REST client
 # -----------------------------
@@ -487,6 +490,15 @@ def ensure_meta_tables(conn):
             value_title TEXT NOT NULL,
             updated_at TIMESTAMPTZ DEFAULT now(),
             PRIMARY KEY (entity_key, b24_field, value_id)
+        );
+        """)
+        # Пользователи для входа в CRM (логин/пароль)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS crm_users (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            created_on TIMESTAMPTZ DEFAULT now()
         );
         """)
     conn.commit()
@@ -3348,22 +3360,40 @@ async def b24_dynamic_item_update(request: Request):
 
 
 def _daily_reports_cron_thread():
-    """В 23:55 по Europe/Chisinau вызывает отправку 7 отчётов (Telegram + Bitrix). Один раз в сутки."""
-    last_run_date = None
+    """В 23:55 по Europe/Chisinau вызывает отправку 7 отчётов (Telegram + Bitrix). Один раз в сутки.
+    Используется файл-маркер на диске, чтобы только один процесс (при нескольких воркерах uvicorn) выполнял отправку."""
+    import errno
     check_interval_sec = 60
+    mark_dir = os.getenv("REPORT_CRON_MARK_DIR", "/tmp").strip() or "/tmp"
+    if mark_dir != "/tmp" and not os.path.isdir(mark_dir):
+        try:
+            os.makedirs(mark_dir, exist_ok=True)
+        except OSError as e:
+            print(f"REPORT CRON: cannot create mark dir {mark_dir}: {e}, using /tmp", file=sys.stderr, flush=True)
+            mark_dir = "/tmp"
     while True:
         try:
             now_local = datetime.now(ZoneInfo(REPORT_CRON_TZ))
+            today_str = now_local.strftime("%Y-%m-%d")
+            mark_file = os.path.join(mark_dir, f"report_cron_sent_{today_str}.mark")
             if (
                 now_local.hour == REPORT_CRON_TIME_HOUR
                 and now_local.minute >= REPORT_CRON_TIME_MINUTE
-                and (last_run_date is None or last_run_date < now_local.date())
             ):
-                # Сразу помечаем день как «уже запускали», чтобы за 5–10 мин отправки не сработать ещё раз
-                last_run_date = now_local.date()
+                if os.path.exists(mark_file):
+                    time.sleep(check_interval_sec)
+                    continue
+                try:
+                    fd = os.open(mark_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    os.close(fd)
+                except OSError as e:
+                    if e.errno == errno.EEXIST:
+                        time.sleep(check_interval_sec)
+                        continue
+                    raise
                 url = f"{REPORT_CRON_BASE_URL}/api/data/reports/stock_auto/pdf/send"
                 print(
-                    f"REPORT CRON: triggering send at {now_local.isoformat()} -> POST {url}",
+                    f"REPORT CRON: triggering send at {now_local.isoformat()} -> POST {url} (mark={mark_file})",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -3387,6 +3417,10 @@ def _daily_reports_cron_thread():
                         file=sys.stderr,
                         flush=True,
                     )
+                    try:
+                        os.remove(mark_file)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"REPORT CRON: error: {e}", file=sys.stderr, flush=True)
         time.sleep(check_interval_sec)

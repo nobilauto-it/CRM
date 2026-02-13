@@ -1,0 +1,49 @@
+Login API — описание
+====================
+
+Назначение
+----------
+API для проверки учётных данных пользователя (логин/пароль) по таблице crm_users в БД.
+
+Таблица crm_users
+-----------------
+Создаётся при вызове POST /sync/schema (вместе с остальными таблицами схемы).
+Поля:
+  - id         SERIAL PRIMARY KEY
+  - username   TEXT NOT NULL
+  - password   TEXT NOT NULL
+  - created_on TIMESTAMPTZ DEFAULT now()
+
+Эндпоинт входа
+--------------
+POST /api/login
+
+Тело запроса (JSON):
+  {
+    "Username": "логин",
+    "Password": "пароль"
+  }
+
+Поведение:
+  - Получает JSON с полями Username и Password.
+  - Ищет в таблице crm_users запись, где username и password совпадают с переданными.
+  - При совпадении: ответ 200, тело { "success": true, "user_id": <id> }.
+  - При несовпадении или пустых полях: 401 (Invalid username or password) или 400 (Username and Password are required).
+
+Полный URL на сервере
+---------------------
+http://194.33.40.197:7070/api/login
+
+Пример вызова (curl)
+--------------------
+curl -X POST http://194.33.40.197:7070/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"Username":"admin","Password":"secret"}'
+
+Команда для создания таблицы crm_users в БД
+--------------------------------------------
+Вызвать синхронизацию схемы (создаёт все таблицы, включая crm_users):
+
+  curl -X POST http://194.33.40.197:7070/sync/schema
+
+После этого в БД появится таблица crm_users. Пользователей нужно добавлять вручную (INSERT) или отдельным скриптом/эндпоинтом.
