@@ -1,9 +1,11 @@
 import base64
+import errno
 import os
 import re
 import sys
 import json
 from io import BytesIO
+from contextvars import ContextVar
 from datetime import datetime, timezone, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -120,8 +122,14 @@ def _get_report_tzinfo():
 
 REPORT_TZINFO = _get_report_tzinfo()
 
+# Если задан при вызове send (report_date=YYYY-MM-DD), отчёт строится за эту дату, а не за "сейчас"
+_report_date_override: ContextVar[Optional[date]] = ContextVar("report_date_override", default=None)
+
 
 def _today_in_report_tz(now_utc: Optional[datetime] = None) -> date:
+    override = _report_date_override.get()
+    if override is not None:
+        return override
     now_utc = now_utc or datetime.now(timezone.utc)
     try:
         return now_utc.astimezone(REPORT_TZINFO).date()
@@ -1385,7 +1393,7 @@ def pg_list_deals_auto_date(
 
     # Фильтруем по ответственным и по дате (DATE("Data - se da in chirie") = CURRENT_DATE)
     now_utc = datetime.now(timezone.utc)
-    today_date = datetime.now(REPORT_TZINFO).date()
+    today_date = _today_in_report_tz()
     filtered: List[Dict[str, Any]] = []
     
     for d in out:
@@ -1527,7 +1535,7 @@ def pg_list_deals_second_table(
 
     out: List[Dict[str, Any]] = []
     # Сегодняшняя дата для сравнения (без манипуляций)
-    today_date = datetime.now(REPORT_TZINFO).date()
+    today_date = _today_in_report_tz()
 
     # Загружаем enum для стадий
     enum_stage = pg_load_enum_map(conn, "deal", "STAGE_ID")
@@ -1650,7 +1658,7 @@ def pg_list_deals_second_table(
                 # Приводим moved_time к REPORT_TZ перед взятием даты, чтобы сравнение было корректным
                 moved_time_in_tz = moved_time.astimezone(REPORT_TZINFO)
                 moved_date = moved_time_in_tz.date()  # Дата в REPORT_TZ
-                today_date = datetime.now(REPORT_TZINFO).date()  # Сегодняшняя дата в REPORT_TZ
+                today_date = _today_in_report_tz()  # Сегодняшняя дата в REPORT_TZ
                 moved_time_str = moved_time_in_tz.strftime("%Y-%m-%d %H:%M")
                 
                 # Чистое сравнение дат (обе в одном часовом поясе)
@@ -1793,7 +1801,7 @@ def pg_list_deals_third_table(
     out: List[Dict[str, Any]] = []
     
     # Сегодняшняя дата для сравнения
-    today_date = datetime.now(REPORT_TZINFO).date()
+    today_date = _today_in_report_tz()
     print(f"DEBUG: pg_list_deals_third_table: START - Today date: {today_date}, branch_name={branch_name}, branch_id={branch_id}, assigned_by_ids param: {assigned_by_ids}", file=sys.stderr, flush=True)
     
     # Фильтры по ответственным
@@ -5701,7 +5709,7 @@ def send_stock_auto_reports_filtered(
             loading_percent = round((chirie_count / total_auto) * 100, 1)
         
         # Форматируем дату в формате DD.MM.YYYY
-        today_str = datetime.now(REPORT_TZINFO).strftime("%d.%m.%Y")
+        today_str = _today_in_report_tz().strftime("%d.%m.%Y")
         
         # Формируем caption в новом формате (румынский язык) с HTML форматированием
         caption = f"<b>{branch_name}</b> - {today_str}\n\n"
@@ -5807,12 +5815,100 @@ def send_stock_auto_reports(
     limit: int = Query(3000, ge=1, le=20000),
     deals_limit: int = Query(2000, ge=1, le=20000),
     assigned_by_ids: Optional[str] = Query(None, description="Comma-separated list of assigned_by_id (e.g., '3238,8136,8138')"),
+    force: bool = Query(False, description="If true, send even if already sent today (manual run)"),
+    report_date: Optional[str] = Query(None, description="YYYY-MM-DD — отчёт за эту дату (например 2026-02-13, если уже 14-е и нужно отправить за вчера)"),
 ):
     """
     Основная отправка PDF по всем филиалам.
     Для Centru — строгий фильтр по ответственным (IDs + fallback по имени).
     Auto Date — только TODAY по REPORT_TZ (Europe/Chisinau). Можно отключить env DEALS_ONLY_TODAY=0.
+    Не более одного запуска в сутки: при повторном вызове возвращает 200 и already_sent_today.
+    ?force=1 — принудительная отправка. ?report_date=2026-02-13 — отчёт за 13-е (если уже 14-е).
     """
+    mark_file: Optional[str] = None
+    token = None
+    if report_date:
+        try:
+            override_d = datetime.strptime(report_date.strip(), "%Y-%m-%d").date()
+            token = _report_date_override.set(override_d)
+            print(f"REPORT send: report_date override={report_date}", file=sys.stderr, flush=True)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="report_date must be YYYY-MM-DD")
+
+    def _clear_override():
+        if token is not None:
+            try:
+                _report_date_override.reset(token)
+            except Exception:
+                pass
+
+    if not force and not report_date:
+        mark_dir = os.getenv("REPORT_CRON_MARK_DIR", "/tmp").strip() or "/tmp"
+        now_local = datetime.now(REPORT_TZINFO)
+        today_str = now_local.strftime("%Y-%m-%d")
+        mark_file = os.path.join(mark_dir, f"report_cron_sent_{today_str}.mark")
+        if os.path.exists(mark_file):
+            print(
+                f"REPORT send: skip (already sent today, mark={mark_file})",
+                file=sys.stderr,
+                flush=True,
+            )
+            _clear_override()
+            return {
+                "ok": True,
+                "sent": 0,
+                "reason": "already_sent_today",
+                "mark_file": mark_file,
+                "today": today_str,
+            }
+        try:
+            fd = os.open(mark_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.close(fd)
+        except OSError as e:
+            if e.errno == errno.EEXIST:
+                print(
+                    f"REPORT send: skip (another process sent today, mark={mark_file})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                _clear_override()
+                return {
+                    "ok": True,
+                    "sent": 0,
+                    "reason": "already_sent_today",
+                    "mark_file": mark_file,
+                    "today": today_str,
+                }
+            raise
+        print(f"REPORT send: mark created, sending 7 reports (mark={mark_file})", file=sys.stderr, flush=True)
+
+    # Блокировка на время отправки: второй запрос (cron + что-то ещё) не пойдёт в отправку
+    send_lock_file: Optional[str] = None
+    mark_dir = os.getenv("REPORT_CRON_MARK_DIR", "/tmp").strip() or "/tmp"
+    now_local = datetime.now(REPORT_TZINFO)
+    today_str_lock = report_date.strip() if report_date else now_local.strftime("%Y-%m-%d")
+    lock_file = os.path.join(mark_dir, f"report_cron_sending_{today_str_lock}.lock")
+    try:
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            print(
+                f"REPORT send: skip (send already in progress or duplicate, lock={lock_file})",
+                file=sys.stderr,
+                flush=True,
+            )
+            _clear_override()
+            return {
+                "ok": False,
+                "sent": 0,
+                "reason": "send_already_in_progress",
+                "detail": "Another request is already sending reports for this date.",
+            }
+        raise
+    send_lock_file = lock_file
+    print(f"REPORT send: lock acquired, sending (lock={lock_file})", file=sys.stderr, flush=True)
+
     if assigned_by_ids is None:
         conn = pg_conn()
         try:
@@ -6629,7 +6725,7 @@ def send_stock_auto_reports(
                             in_chirie = sum(1 for item in recovery_raw_items if item.get("stage_name", "").lower() in ["în chirie", "in chirie", "în chirii"])
                             incarcare = round((in_chirie / total_auto * 100) if total_auto > 0 else 0, 1)
                             
-                            today_str = datetime.now(REPORT_TZINFO).strftime("%d.%m.%Y")
+                            today_str = _today_in_report_tz().strftime("%d.%m.%Y")
                             caption = f"<b>{display_name}</b> - {today_str}\n\n<b>Total venit astăzi - {total_venit} MDL</b>\n<b>Auto - {total_auto}</b>\n\nMașini date - <b>{masini_date}</b>\nMașini primite - <b>{masini_primite}</b>\nMașini prelungite - <b>{masini_prelungite}</b>\n\nÎncărcare filială - <b>{incarcare}%</b> (În chirie - <b>{in_chirie}</b> auto)"
                             
                             send_pdf_to_telegram(pdf, filename=filename, caption=caption)
@@ -6801,7 +6897,7 @@ def send_stock_auto_reports(
                     loading_percent = round((chirie_count / total_auto) * 100, 1)
                 
                 # Форматируем дату в формате DD.MM.YYYY
-                today_str = datetime.now(REPORT_TZINFO).strftime("%d.%m.%Y")
+                today_str = _today_in_report_tz().strftime("%d.%m.%Y")
                 
                 # Тот же расчет, что и в отчете: используем calculate_responsible_totals
                 caption_total = 0
@@ -6928,7 +7024,7 @@ def send_stock_auto_reports(
                         )
                         safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(display_name)).strip("_") or "branch"
                         filename = f"stock_auto_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-                        today_str = datetime.now(REPORT_TZINFO).strftime("%d.%m.%Y")
+                        today_str = _today_in_report_tz().strftime("%d.%m.%Y")
                         caption = (
                             f"<b>{display_name}</b> - {today_str}\n\n"
                             f"<b>Total venit astăzi - 0 MDL</b>\n"
@@ -7043,6 +7139,12 @@ def send_stock_auto_reports(
             "sent": ungheni_sent,
         }
         
+        if send_lock_file and os.path.exists(send_lock_file):
+            try:
+                os.remove(send_lock_file)
+            except Exception:
+                pass
+        _clear_override()
         return resp
 
     except HTTPException:
@@ -7053,3 +7155,16 @@ def send_stock_auto_reports(
                 conn.rollback()
         except Exception:
             pass
+        try:
+            if mark_file and os.path.exists(mark_file):
+                os.remove(mark_file)
+                print(f"REPORT send: removed mark on error: {mark_file}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        try:
+            if send_lock_file and os.path.exists(send_lock_file):
+                os.remove(send_lock_file)
+        except Exception:
+            pass
+        _clear_override()
+        raise HTTPException(status_code=500, detail=str(e))

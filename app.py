@@ -3381,19 +3381,13 @@ def _daily_reports_cron_thread():
                 and now_local.minute >= REPORT_CRON_TIME_MINUTE
             ):
                 if os.path.exists(mark_file):
+                    # Уже отправляли сегодня — не дергаем эндпоинт
                     time.sleep(check_interval_sec)
                     continue
-                try:
-                    fd = os.open(mark_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                    os.close(fd)
-                except OSError as e:
-                    if e.errno == errno.EEXIST:
-                        time.sleep(check_interval_sec)
-                        continue
-                    raise
+                # Маркер создаёт только эндпоинт при отправке; здесь только POST
                 url = f"{REPORT_CRON_BASE_URL}/api/data/reports/stock_auto/pdf/send"
                 print(
-                    f"REPORT CRON: triggering send at {now_local.isoformat()} -> POST {url} (mark={mark_file})",
+                    f"REPORT CRON: triggering send at {now_local.isoformat()} -> POST {url}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -3417,10 +3411,6 @@ def _daily_reports_cron_thread():
                         file=sys.stderr,
                         flush=True,
                     )
-                    try:
-                        os.remove(mark_file)
-                    except Exception:
-                        pass
         except Exception as e:
             print(f"REPORT CRON: error: {e}", file=sys.stderr, flush=True)
         time.sleep(check_interval_sec)
