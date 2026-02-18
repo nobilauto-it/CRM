@@ -58,8 +58,6 @@ BITRIX_BACKOFF_BASE_SEC = float(os.getenv("BITRIX_BACKOFF_BASE_SEC", "0.7"))
 
 # Ежедневная отправка 7 PDF-отчётов в 23:55 (Telegram + Bitrix)
 REPORT_CRON_BASE_URL = os.getenv("REPORT_CRON_BASE_URL", "http://127.0.0.1:7070").strip().rstrip("/")
-REPORT_CRON_TIME_HOUR = int(os.getenv("REPORT_CRON_HOUR", "23"))
-REPORT_CRON_TIME_MINUTE = int(os.getenv("REPORT_CRON_MINUTE", "55"))
 REPORT_CRON_TZ = os.getenv("REPORT_TZ", "Europe/Chisinau").strip() or "Europe/Chisinau"
 
 # =====================================================================
@@ -3059,6 +3057,10 @@ def _guess_entity_from_event(event_name: str, payload: Dict[str, Any]) -> Tuple[
         return ("contact", entity_id, en)
     if "LEAD" in en_up:
         return ("lead", entity_id, en)
+    if "COMPANY" in en_up:
+        return ("company", entity_id, en)
+    if "USER" in en_up:
+        return ("user", entity_id, en)
     if entity_type_id:
         return (f"sp:{int(entity_type_id)}", entity_id, en)
 
@@ -3167,6 +3169,44 @@ def _upsert_single_item(conn, entity_key: str, item: Dict[str, Any]) -> bool:
     upsert_rows(conn, table, col_order, [[row.get(c) for c in col_order]])
     return True
 
+
+def _event_is_delete(event_name: str, payload: Optional[Dict[str, Any]] = None) -> bool:
+    ev_parts: List[str] = []
+    if event_name:
+        ev_parts.append(str(event_name))
+    if isinstance(payload, dict):
+        for k in ("event", "event_name", "EVENT_NAME", "action", "ACTION"):
+            v = payload.get(k)
+            if v is not None:
+                ev_parts.append(str(v))
+        data = payload.get("data") or payload.get("DATA")
+        if isinstance(data, dict):
+            for k in ("event", "event_name", "EVENT_NAME", "action", "ACTION"):
+                v = data.get(k)
+                if v is not None:
+                    ev_parts.append(str(v))
+
+    ev_up = " | ".join(ev_parts).upper()
+    return ("DELETE" in ev_up) or ("REMOVE" in ev_up)
+
+
+def _delete_single_item(conn, entity_key: str, entity_id: int) -> bool:
+    try:
+        ek = str(entity_key or "").strip().lower()
+        if ek == "user":
+            table = "b24_users"
+        else:
+            table = table_name_for_entity(entity_key)
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {table} WHERE id=%s", (int(entity_id),))
+            deleted = int(cur.rowcount or 0)
+        logi(f"INFO: webhook delete: entity_key={entity_key} id={entity_id} deleted_rows={deleted}")
+        return True
+    except Exception as e:
+        logi(f"ERROR: webhook delete failed: entity_key={entity_key} id={entity_id}: {e}")
+        traceback.print_exc()
+        return False
+
 def webhook_queue_worker(stop_event: threading.Event) -> None:
     logi("INFO: webhook_queue_worker started")
     while not stop_event.is_set():
@@ -3177,6 +3217,7 @@ def webhook_queue_worker(stop_event: threading.Event) -> None:
                 cur.execute("""
                     SELECT id, entity_key, entity_id,
                            COALESCE(event_name, event) AS event_name,
+                           payload,
                            attempts
                     FROM public.b24_webhook_queue
                     WHERE status IN ('new','retry','pending')
@@ -3198,6 +3239,7 @@ def webhook_queue_worker(stop_event: threading.Event) -> None:
                 ek = str(job["entity_key"])
                 eid = int(job["entity_id"])
                 ev = str(job.get("event_name") or "")
+                payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
                 attempts = int(job.get("attempts") or 0)
 
                 # mark processing
@@ -3206,11 +3248,28 @@ def webhook_queue_worker(stop_event: threading.Event) -> None:
                     curp.execute("UPDATE public.b24_webhook_queue SET status='processing' WHERE id=%s", (qid,))
                 connp.close()
 
-                # delete event -> just mark done
-                if "DELETE" in ev.upper() or "REMOVE" in ev.upper():
+                # delete event/action -> delete row from local DB, then mark queue item done
+                if _event_is_delete(ev, payload):
+                    connd = pg_conn(); connd.autocommit = True
+                    ok_del = False
+                    try:
+                        ok_del = _delete_single_item(connd, ek, eid)
+                    finally:
+                        connd.close()
+
                     connm = pg_conn(); connm.autocommit=True
                     with connm.cursor() as curm:
-                        curm.execute("UPDATE public.b24_webhook_queue SET status='done', processed_at=now(), last_error=NULL WHERE id=%s", (qid,))
+                        if ok_del:
+                            curm.execute("UPDATE public.b24_webhook_queue SET status='done', processed_at=now(), last_error=NULL WHERE id=%s", (qid,))
+                        else:
+                            backoff = min(300, 5 * (attempts + 1))
+                            curm.execute("""
+                                UPDATE public.b24_webhook_queue
+                                SET status='retry', attempts=attempts+1,
+                                    last_error=%s,
+                                    next_run_at=now() + (%s || ' seconds')::interval
+                                WHERE id=%s
+                            """, ("delete failed", backoff, qid))
                     connm.close()
                     continue
 
@@ -3323,6 +3382,8 @@ async def b24_dynamic_item_update(request: Request):
             entity_key = "contact"
         elif "ONCRMCOMPANY" in ev:
             entity_key = "company"
+        elif "ONUSER" in ev or ev.startswith("ONUSER"):
+            entity_key = "user"
         elif "ONCRMDYNAMICITEM" in ev or "DYNAMIC" in ev:
             # smart-process / dynamic items
             if not entity_type_id_str:
@@ -3376,10 +3437,8 @@ def _daily_reports_cron_thread():
             now_local = datetime.now(ZoneInfo(REPORT_CRON_TZ))
             today_str = now_local.strftime("%Y-%m-%d")
             mark_file = os.path.join(mark_dir, f"report_cron_sent_{today_str}.mark")
-            if (
-                now_local.hour == REPORT_CRON_TIME_HOUR
-                and now_local.minute >= REPORT_CRON_TIME_MINUTE
-            ):
+            # Строго 23:55 по REPORT_CRON_TZ (Europe/Chisinau), без переопределения через env
+            if now_local.hour == 23 and now_local.minute >= 55:
                 if os.path.exists(mark_file):
                     # Уже отправляли сегодня — не дергаем эндпоинт
                     time.sleep(check_interval_sec)
@@ -3423,7 +3482,7 @@ def on_startup():
     report_cron_thread = threading.Thread(target=_daily_reports_cron_thread, daemon=True)
     report_cron_thread.start()
     print(
-        f"REPORT CRON: daily send at {REPORT_CRON_TIME_HOUR}:{REPORT_CRON_TIME_MINUTE:02d} {REPORT_CRON_TZ} -> Telegram + Bitrix",
+        f"REPORT CRON: daily send at 23:55 {REPORT_CRON_TZ} -> Telegram + Bitrix",
         file=sys.stderr,
         flush=True,
     )
