@@ -842,9 +842,24 @@ def get_entity_meta_data(
                 field_alias_to_col[str(b24_f).lower()] = col
         # Для deal: даже если "Ответственный" показывается через assigned_by_name,
         # запрос fields=assigned_by_id должен явно маппиться в raw id колонку.
-        if final_entity_key == "deal" and _table_has_column(conn, table_name, "assigned_by_id"):
-            field_alias_to_col["assigned_by_id"] = "assigned_by_id"
-            field_alias_to_col["ASSIGNED_BY_ID"] = "assigned_by_id"
+        if final_entity_key == "deal":
+            has_assigned_id = _table_has_column(conn, table_name, "assigned_by_id")
+            has_assigned_name = _table_has_column(conn, table_name, "assigned_by_name")
+            if has_assigned_id:
+                field_alias_to_col["assigned_by_id"] = "assigned_by_id"
+                field_alias_to_col["ASSIGNED_BY_ID"] = "assigned_by_id"
+            # Критично для фронта: эти ключи должны маппиться всегда.
+            # Если нет физической assigned_by_name — используем assigned_by_id и резолвим имя в _decode_record.
+            if has_assigned_name:
+                field_alias_to_col["assigned_by_name"] = "assigned_by_name"
+                field_alias_to_col["ASSIGNED_BY_NAME"] = "assigned_by_name"
+                field_alias_to_col["Ответственный"] = "assigned_by_name"
+                field_alias_to_col["ответственный"] = "assigned_by_name"
+            elif has_assigned_id:
+                field_alias_to_col["assigned_by_name"] = "assigned_by_id"
+                field_alias_to_col["ASSIGNED_BY_NAME"] = "assigned_by_id"
+                field_alias_to_col["Ответственный"] = "assigned_by_id"
+                field_alias_to_col["ответственный"] = "assigned_by_id"
         requested_output_pairs: List[Tuple[str, str]] = []
         if fields:
             requested_titles = [s.strip() for s in fields.split(",") if s.strip()]
