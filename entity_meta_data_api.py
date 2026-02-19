@@ -753,6 +753,8 @@ def get_entity_meta_data(
     entity_key: Optional[str] = Query(None, description="Для smart_process обязателен, например sp:1114"),
     limit: int = Query(100, ge=1, le=10000, description="Максимум записей"),
     offset: int = Query(0, ge=0, description="Смещение"),
+    id: Optional[int] = Query(None, description="Фильтр по одному ID записи"),
+    ids: Optional[str] = Query(None, description="Фильтр по нескольким ID (через запятую)"),
     fields: Optional[str] = Query(
         None,
         description="Список полей (human_title через запятую). Если задан — в ответе только эти поля; иначе все.",
@@ -813,14 +815,39 @@ def get_entity_meta_data(
         cid = (str(category_id).strip() if category_id is not None else "") or ""
         if cid and not category_col:
             category_col = _get_category_column_from_table(conn, table_name)
-        where_sql = ""
-        count_params: List[Any] = []
-        select_params: List[Any] = []
+
+        # Универсальные фильтры: category_id + id/ids
+        where_parts: List[str] = []
+        where_params: List[Any] = []
         if cid and category_col:
             safe_col = category_col.replace('"', '""')
-            where_sql = f' WHERE "{safe_col}"::text = %s'
-            count_params = [cid]
-            select_params = [cid, limit, offset]
+            where_parts.append(f'"{safe_col}"::text = %s')
+            where_params.append(cid)
+
+        id_values: List[int] = []
+        if id is not None:
+            try:
+                iv = int(id)
+                if iv > 0:
+                    id_values.append(iv)
+            except Exception:
+                pass
+        if ids:
+            for s in [x.strip() for x in str(ids).split(",") if x.strip()]:
+                try:
+                    iv = int(s)
+                    if iv > 0:
+                        id_values.append(iv)
+                except Exception:
+                    continue
+        id_values = list(dict.fromkeys(id_values))
+        if id_values:
+            where_parts.append("id = ANY(%s)")
+            where_params.append(id_values)
+
+        where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        count_params: List[Any] = list(where_params)
+        select_params: List[Any] = list(where_params) + [limit, offset]
 
         with conn.cursor() as cur:
             if where_sql:
