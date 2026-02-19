@@ -531,6 +531,7 @@ def _enum_value_to_title(val: Any, field_enum_map: Dict[Tuple[str, str], str], b
 
 def _decode_record(
     record: Dict[str, Any],
+    src_row: Dict[str, Any],
     entity_key: str,
     col_to_title: Dict[str, str],
     title_to_col: Dict[str, str],
@@ -583,10 +584,52 @@ def _decode_record(
                 record[title] = stages_map.get(str(val).strip(), val)
             continue
         if t in ("user", "crm_user", "assigned_by"):
-            if val is None:
+            raw_val = val
+            # fallback: пытаемся взять id из исходной строки по b24/column ключам
+            if raw_val in (None, "", 0, "0"):
+                b24_f = (col_to_b24_field or {}).get(col) or ""
+                candidates = [
+                    col,
+                    str(col).lower(),
+                    str(col).upper(),
+                    b24_f,
+                    str(b24_f).lower(),
+                    str(b24_f).upper(),
+                    "assigned_by_id",
+                    "ASSIGNED_BY_ID",
+                ]
+                for ck in candidates:
+                    if not ck:
+                        continue
+                    v = src_row.get(ck)
+                    if v not in (None, "", 0, "0"):
+                        raw_val = v
+                        break
+                if raw_val in (None, "", 0, "0"):
+                    raw_obj = src_row.get("raw")
+                    if isinstance(raw_obj, dict):
+                        for rk in ("ASSIGNED_BY_ID", "assigned_by_id", b24_f, str(b24_f).lower()):
+                            if not rk:
+                                continue
+                            v = raw_obj.get(rk)
+                            if v not in (None, "", 0, "0"):
+                                raw_val = v
+                                break
+
+            if raw_val in (None, "", 0, "0"):
+                record[title] = ""
                 continue
-            key = str(val).strip()
-            record[title] = user_names_map.get(key, val)
+
+            key = str(raw_val).strip()
+            # Даже при пустом lookup возвращаем id, чтобы фронт видел Ответственного.
+            record[title] = user_names_map.get(key) or key
+            # Тех.ключ для фронта (опционально) — полезен для фильтров/дебага.
+            if "assigned_by_id" not in record and (
+                title == "Ответственный"
+                or col == "assigned_by_id"
+                or (col_to_b24_field or {}).get(col, "").upper() == "ASSIGNED_BY_ID"
+            ):
+                record["assigned_by_id"] = key
         elif t in ("crm_contact", "contact"):
             if val is None:
                 continue
@@ -780,16 +823,53 @@ def get_entity_meta_data(
 
         columns = list(all_columns)
         title_to_col = {title: col for col, title in col_to_title.items()}
+        col_to_b24 = _load_col_to_b24_field(conn, final_entity_key)
+        # Алиасы для fields: human_title / column_name / b24_field (регистронезависимо)
+        field_alias_to_col: Dict[str, str] = {}
+        for col, title in col_to_title.items():
+            for k in (title, str(title).lower(), col, str(col).lower()):
+                if k:
+                    field_alias_to_col[k] = col
+            b24_f = col_to_b24.get(col)
+            if b24_f:
+                field_alias_to_col[str(b24_f)] = col
+                field_alias_to_col[str(b24_f).lower()] = col
         if fields:
             requested_titles = [s.strip() for s in fields.split(",") if s.strip()]
             if requested_titles:
-                requested_cols = [title_to_col.get(t) for t in requested_titles if title_to_col.get(t)]
+                requested_cols: List[str] = []
+                for t in requested_titles:
+                    c = (
+                        title_to_col.get(t)
+                        or field_alias_to_col.get(t)
+                        or field_alias_to_col.get(str(t).lower())
+                    )
+                    if c:
+                        requested_cols.append(c)
                 requested_cols = list(dict.fromkeys(c for c in requested_cols if c))
                 if requested_cols:
                     columns = requested_cols
-        columns_str = ", ".join(f'"{c}"' for c in columns)
+
+        # Для user-полей иногда нужен сырой id из assigned_by_id, даже если фронт просит "Ответственный".
+        query_columns = list(columns)
+        has_user_requested = False
+        col_types_preview = _col_types_with_infer(
+            conn, final_entity_key, query_columns, _load_meta_column_types(conn, final_entity_key)
+        )
+        for c in query_columns:
+            t = (col_types_preview.get(c) or "").strip().lower()
+            if t in ("user", "crm_user", "assigned_by"):
+                has_user_requested = True
+                break
+            if c == "assigned_by_id" or (col_to_b24.get(c, "").upper() == "ASSIGNED_BY_ID"):
+                has_user_requested = True
+                break
+        if has_user_requested and "assigned_by_id" in all_columns and "assigned_by_id" not in query_columns:
+            query_columns.append("assigned_by_id")
+
+        columns_str = ", ".join(f'"{c}"' for c in query_columns)
         col_types = _col_types_with_infer(
-            conn, final_entity_key, columns, _load_meta_column_types(conn, final_entity_key)
+            conn, final_entity_key, query_columns, _load_meta_column_types(conn, final_entity_key)
         )
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -858,7 +938,6 @@ def get_entity_meta_data(
         user_ids_unique = list(dict.fromkeys(user_ids))
         user_names_map = _load_user_names(conn, user_ids_unique) if user_ids_unique else {}
 
-        col_to_b24 = _load_col_to_b24_field(conn, final_entity_key)
         categories_map = _load_deal_categories(conn) if final_entity_key == "deal" else {}
         sp_entity_type_id = (final_entity_key or "").split(":")[-1] if (final_entity_key or "").startswith("sp:") else ""
         sp_categories_map = _load_sp_categories(conn, sp_entity_type_id) if sp_entity_type_id else {}
@@ -883,6 +962,7 @@ def get_entity_meta_data(
                     record[title] = value
             _decode_record(
                 record,
+                row,
                 final_entity_key,
                 col_to_title,
                 title_to_col,
