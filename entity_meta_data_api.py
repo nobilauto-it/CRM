@@ -47,6 +47,19 @@ def _table_has_column(conn, table_name: str, column_name: str) -> bool:
         return cur.fetchone() is not None
 
 
+def _table_existing_columns(conn, table_name: str) -> set:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (table_name,),
+        )
+        return {str(r[0]) for r in (cur.fetchall() or []) if r and r[0]}
+
+
 def _get_category_column_from_table(conn, table_name: str) -> Optional[str]:
     """Возвращает имя колонки воронки (category_id и т.п.) в таблице, если есть."""
     with conn.cursor() as cur:
@@ -755,6 +768,9 @@ def get_entity_meta_data(
     offset: int = Query(0, ge=0, description="Смещение"),
     id: Optional[int] = Query(None, description="Фильтр по одному ID записи"),
     ids: Optional[str] = Query(None, description="Фильтр по нескольким ID (через запятую)"),
+    contact_id: Optional[int] = Query(None, description="Alias для id при type=contact"),
+    lead_id: Optional[int] = Query(None, description="Alias для id при type=lead"),
+    company_id: Optional[int] = Query(None, description="Alias для id при type=company"),
     fields: Optional[str] = Query(
         None,
         description="Список полей (human_title через запятую). Если задан — в ответе только эти поля; иначе все.",
@@ -810,6 +826,9 @@ def get_entity_meta_data(
                 "fields": [],
             }
 
+        existing_cols = _table_existing_columns(conn, table_name)
+        # Защита от битой meta-схемы (например id_2 в b24_meta_fields, которого нет физически в таблице)
+        col_to_title = {c: t for c, t in col_to_title.items() if c in existing_cols}
         all_columns = list(col_to_title.keys())
         category_col = next((c for c in all_columns if _is_category_column(c)), None)
         cid = (str(category_id).strip() if category_id is not None else "") or ""
@@ -825,6 +844,13 @@ def get_entity_meta_data(
             where_params.append(cid)
 
         id_values: List[int] = []
+        if type == "contact" and contact_id is not None:
+            id = contact_id
+        elif type == "lead" and lead_id is not None:
+            id = lead_id
+        elif type == "company" and company_id is not None:
+            id = company_id
+
         if id is not None:
             try:
                 iv = int(id)
@@ -842,8 +868,10 @@ def get_entity_meta_data(
                     continue
         id_values = list(dict.fromkeys(id_values))
         if id_values:
-            where_parts.append("id = ANY(%s)")
+            id_values_str = [str(v) for v in id_values]
+            where_parts.append("(id = ANY(%s) OR COALESCE(raw->>'ID', raw->>'id', '') = ANY(%s))")
             where_params.append(id_values)
+            where_params.append(id_values_str)
 
         where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
         count_params: List[Any] = list(where_params)
@@ -1112,6 +1140,8 @@ def get_entity_meta_data_by_ids(
             cur.execute("SET client_encoding TO 'UTF8'")
 
         col_to_title = _col_to_human_title_map(conn, final_entity_key)
+        existing_cols = _table_existing_columns(conn, table_name)
+        col_to_title = {c: t for c, t in col_to_title.items() if c in existing_cols}
         all_columns = list(col_to_title.keys())
         title_to_col = {title: col for col, title in col_to_title.items()}
         col_to_b24 = _load_col_to_b24_field(conn, final_entity_key)
