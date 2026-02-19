@@ -534,7 +534,7 @@ def _decode_record(
     src_row: Dict[str, Any],
     entity_key: str,
     col_to_title: Dict[str, str],
-    title_to_col: Dict[str, str],
+    output_to_col: Dict[str, str],
     col_types: Dict[str, str],
     sources: Dict[str, str],
     contact_names: Dict[str, str],
@@ -566,7 +566,7 @@ def _decode_record(
     company_field_to_title = company_field_to_title or {}
     company_field_enum_map = company_field_enum_map or {}
     sp_categories_map = sp_categories_map or {}
-    for title, col in title_to_col.items():
+    for title, col in output_to_col.items():
         val = record.get(title)
         if val is None and title not in record:
             continue
@@ -623,14 +623,14 @@ def _decode_record(
                 continue
 
             key = str(raw_val).strip()
-            # Даже при пустом lookup возвращаем id/значение, чтобы фронт видел Ответственного.
-            record[title] = user_names_map.get(key) or key
+            # Для тех. ключа assigned_by_id всегда возвращаем raw id.
+            if str(title).strip().lower() == "assigned_by_id":
+                record[title] = key
+            else:
+                # Для человекочитаемых ключей (Ответственный/assigned_by_name) отдаем имя, fallback на id.
+                record[title] = user_names_map.get(key) or key
             # Тех.ключ для фронта (опционально) — полезен для фильтров/дебага.
-            if "assigned_by_id" not in record and (
-                title == "Ответственный"
-                or col == "assigned_by_id"
-                or (col_to_b24_field or {}).get(col, "").upper() == "ASSIGNED_BY_ID"
-            ):
+            if "assigned_by_id" not in record and title == "Ответственный":
                 record["assigned_by_id"] = key
         elif t in ("crm_contact", "contact"):
             if val is None:
@@ -841,6 +841,7 @@ def get_entity_meta_data(
         if final_entity_key == "deal" and _table_has_column(conn, table_name, "assigned_by_id"):
             field_alias_to_col["assigned_by_id"] = "assigned_by_id"
             field_alias_to_col["ASSIGNED_BY_ID"] = "assigned_by_id"
+        requested_output_pairs: List[Tuple[str, str]] = []
         if fields:
             requested_titles = [s.strip() for s in fields.split(",") if s.strip()]
             if requested_titles:
@@ -853,6 +854,7 @@ def get_entity_meta_data(
                     )
                     if c:
                         requested_cols.append(c)
+                        requested_output_pairs.append((t, c))
                 requested_cols = list(dict.fromkeys(c for c in requested_cols if c))
                 if requested_cols:
                     columns = requested_cols
@@ -956,23 +958,34 @@ def get_entity_meta_data(
         b24_fields_for_enum = list(dict.fromkeys(col_to_b24.values())) if col_to_b24 else []
         field_enum_map = _load_field_enum_map(conn, final_entity_key, b24_fields_for_enum) if b24_fields_for_enum else {}
 
+        output_pairs: List[Tuple[str, str]]
+        if requested_output_pairs:
+            # Сохраняем запрошенные ключи фронта как ключи output row
+            output_pairs = requested_output_pairs
+        else:
+            output_pairs = [(col_to_title.get(c, c), c) for c in columns]
+
+        output_to_col: Dict[str, str] = {}
+        for out_key, c in output_pairs:
+            if out_key and c:
+                output_to_col[out_key] = c
+
         data: List[Dict[str, Any]] = []
         for row in rows:
             record: Dict[str, Any] = {}
-            for col in columns:
-                title = col_to_title.get(col, col)
+            for out_key, col in output_pairs:
                 value = row.get(col)
                 try:
-                    record[title] = _normalize_value(value)
+                    record[out_key] = _normalize_value(value)
                 except Exception as e:
                     print(f"WARNING: entity-meta-data normalize {col}: {e}", file=sys.stderr, flush=True)
-                    record[title] = value
+                    record[out_key] = value
             _decode_record(
                 record,
                 row,
                 final_entity_key,
                 col_to_title,
-                title_to_col,
+                output_to_col,
                 col_types,
                 sources_map,
                 contact_names_map,
@@ -999,7 +1012,10 @@ def get_entity_meta_data(
             "offset": offset,
             "data": data,
         }
-        out["fields"] = [col_to_title.get(c, c) for c in columns]
+        if requested_output_pairs:
+            out["fields"] = [k for k, _ in output_pairs]
+        else:
+            out["fields"] = [col_to_title.get(c, c) for c in columns]
         return out
     except HTTPException:
         raise
