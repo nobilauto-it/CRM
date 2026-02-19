@@ -749,7 +749,7 @@ def debug_entity_enum(
 
 @router.get("/")
 def get_entity_meta_data(
-    type: str = Query(..., description="Тип сущности: deal, contact, lead, smart_process"),
+    type: str = Query(..., description="Тип сущности: deal, contact, lead, company, smart_process"),
     entity_key: Optional[str] = Query(None, description="Для smart_process обязателен, например sp:1114"),
     limit: int = Query(100, ge=1, le=10000, description="Максимум записей"),
     offset: int = Query(0, ge=0, description="Смещение"),
@@ -768,10 +768,10 @@ def get_entity_meta_data(
     Параметр fields — только запрошенные поля в каждой записи.
     Параметр category_id — фильтр по воронке (deal/smart_process); total — по отфильтрованным записям.
     """
-    if type not in ("smart_process", "deal", "contact", "lead"):
+    if type not in ("smart_process", "deal", "contact", "lead", "company"):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid type: '{type}'. Must be smart_process, deal, contact or lead",
+            detail=f"Invalid type: '{type}'. Must be smart_process, deal, contact, lead or company",
         )
 
     if type == "deal":
@@ -780,6 +780,8 @@ def get_entity_meta_data(
         final_entity_key = "contact"
     elif type == "lead":
         final_entity_key = "lead"
+    elif type == "company":
+        final_entity_key = "company"
     else:
         if not entity_key or not entity_key.startswith("sp:"):
             raise HTTPException(
@@ -860,7 +862,7 @@ def get_entity_meta_data(
                 field_alias_to_col["ASSIGNED_BY_NAME"] = "assigned_by_id"
                 field_alias_to_col["Ответственный"] = "assigned_by_id"
                 field_alias_to_col["ответственный"] = "assigned_by_id"
-        requested_output_pairs: List[Tuple[str, str]] = []
+        requested_output_pairs: List[Tuple[str, Optional[str]]] = []
         if fields:
             requested_titles = [s.strip() for s in fields.split(",") if s.strip()]
             if requested_titles:
@@ -871,12 +873,12 @@ def get_entity_meta_data(
                         or field_alias_to_col.get(t)
                         or field_alias_to_col.get(str(t).lower())
                     )
+                    requested_output_pairs.append((t, c))
                     if c:
                         requested_cols.append(c)
-                        requested_output_pairs.append((t, c))
                 requested_cols = list(dict.fromkeys(c for c in requested_cols if c))
-                if requested_cols:
-                    columns = requested_cols
+                # strict contract: если fields передан, в output только запрошенные ключи
+                columns = requested_cols
 
         # Для user-полей иногда нужен сырой id из assigned_by_id, даже если фронт просит "Ответственный".
         query_columns = list(columns)
@@ -894,6 +896,10 @@ def get_entity_meta_data(
                 break
         if has_user_requested and _table_has_column(conn, table_name, "assigned_by_id") and "assigned_by_id" not in query_columns:
             query_columns.append("assigned_by_id")
+
+        if not query_columns:
+            # Технический минимум для валидного SELECT, если ни один requested key не сматчился с колонкой.
+            query_columns = ["id"]
 
         columns_str = ", ".join(f'"{c}"' for c in query_columns)
         col_types = _col_types_with_infer(
@@ -977,7 +983,7 @@ def get_entity_meta_data(
         b24_fields_for_enum = list(dict.fromkeys(col_to_b24.values())) if col_to_b24 else []
         field_enum_map = _load_field_enum_map(conn, final_entity_key, b24_fields_for_enum) if b24_fields_for_enum else {}
 
-        output_pairs: List[Tuple[str, str]]
+        output_pairs: List[Tuple[str, Optional[str]]]
         if requested_output_pairs:
             # Сохраняем запрошенные ключи фронта как ключи output row
             output_pairs = requested_output_pairs
@@ -993,7 +999,7 @@ def get_entity_meta_data(
         for row in rows:
             record: Dict[str, Any] = {}
             for out_key, col in output_pairs:
-                value = row.get(col)
+                value = row.get(col) if col else None
                 try:
                     record[out_key] = _normalize_value(value)
                 except Exception as e:
@@ -1036,6 +1042,182 @@ def get_entity_meta_data(
         else:
             out["fields"] = [col_to_title.get(c, c) for c in columns]
         return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@router.get("/by-ids")
+def get_entity_meta_data_by_ids(
+    type: str = Query(..., description="Тип сущности: contact, lead, company"),
+    ids: str = Query(..., description="Comma-separated IDs, e.g. 10,11,12"),
+    fields: Optional[str] = Query(
+        None,
+        description="Список полей через запятую. Если задан — строгий output только по requested keys.",
+    ),
+) -> Dict[str, Any]:
+    if type not in ("contact", "lead", "company"):
+        raise HTTPException(status_code=400, detail="type must be contact, lead or company")
+
+    id_list: List[int] = []
+    for s in [x.strip() for x in (ids or "").split(",") if x.strip()]:
+        try:
+            v = int(s)
+            if v > 0:
+                id_list.append(v)
+        except Exception:
+            continue
+    id_list = list(dict.fromkeys(id_list))
+    if not id_list:
+        return {"ok": True, "type": type, "ids": [], "data": [], "fields": []}
+
+    final_entity_key = type
+    table_name = table_name_for_entity(final_entity_key)
+    conn = pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET client_encoding TO 'UTF8'")
+
+        col_to_title = _col_to_human_title_map(conn, final_entity_key)
+        all_columns = list(col_to_title.keys())
+        title_to_col = {title: col for col, title in col_to_title.items()}
+        col_to_b24 = _load_col_to_b24_field(conn, final_entity_key)
+
+        field_alias_to_col: Dict[str, str] = {}
+        for col, title in col_to_title.items():
+            for k in (title, str(title).lower(), col, str(col).lower()):
+                if k:
+                    field_alias_to_col[k] = col
+            b24_f = col_to_b24.get(col)
+            if b24_f:
+                field_alias_to_col[str(b24_f)] = col
+                field_alias_to_col[str(b24_f).lower()] = col
+
+        columns = list(all_columns)
+        requested_output_pairs: List[Tuple[str, Optional[str]]] = []
+        if fields:
+            requested = [s.strip() for s in fields.split(",") if s.strip()]
+            for t in requested:
+                c = title_to_col.get(t) or field_alias_to_col.get(t) or field_alias_to_col.get(str(t).lower())
+                requested_output_pairs.append((t, c))
+            columns = list(dict.fromkeys(c for _, c in requested_output_pairs if c))
+
+        query_columns = list(columns)
+        if "id" not in query_columns:
+            query_columns.append("id")
+        if not query_columns:
+            query_columns = ["id"]
+
+        columns_str = ", ".join(f'"{c}"' for c in query_columns)
+        col_types = _col_types_with_infer(
+            conn, final_entity_key, query_columns, _load_meta_column_types(conn, final_entity_key)
+        )
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f'SELECT {columns_str} FROM "{table_name}" WHERE id = ANY(%s)',
+                (id_list,),
+            )
+            rows = cur.fetchall() or []
+
+        # decode helpers
+        contact_ids: List[int] = []
+        lead_ids: List[int] = []
+        company_ids: List[int] = []
+        user_ids: List[str] = []
+        for col, t in col_types.items():
+            for row in rows:
+                v = row.get(col)
+                if v is None or not str(v).strip():
+                    continue
+                if t in ("crm_contact", "contact"):
+                    try:
+                        contact_ids.append(int(v))
+                    except Exception:
+                        pass
+                elif t in ("crm_lead", "lead"):
+                    try:
+                        lead_ids.append(int(v))
+                    except Exception:
+                        pass
+                elif t in ("crm_company", "company"):
+                    try:
+                        company_ids.append(int(v))
+                    except Exception:
+                        pass
+                elif t in ("user", "crm_user", "assigned_by"):
+                    user_ids.append(str(v).strip())
+
+        contact_names_map = _load_contact_names(conn, list(dict.fromkeys(contact_ids))) if contact_ids else {}
+        lead_titles_map = _load_lead_titles(conn, list(dict.fromkeys(lead_ids))) if lead_ids else {}
+        company_ids_unique = list(dict.fromkeys(company_ids))
+        company_titles_map = _load_company_titles(conn, company_ids_unique) if company_ids_unique else {}
+        company_data_map = _load_company_data(conn, company_ids_unique) if company_ids_unique else {}
+        company_field_to_title_map = _load_company_field_to_human_title(conn) if company_ids_unique else {}
+        company_b24_fields = list(company_field_to_title_map.keys()) if company_field_to_title_map else []
+        company_field_enum_map = _load_field_enum_map(conn, "company", company_b24_fields) if company_b24_fields else {}
+        user_names_map = _load_user_names(conn, list(dict.fromkeys(user_ids))) if user_ids else {}
+        field_enum_map = _load_field_enum_map(conn, final_entity_key, list(dict.fromkeys(col_to_b24.values()))) if col_to_b24 else {}
+
+        if requested_output_pairs:
+            output_pairs: List[Tuple[str, Optional[str]]] = requested_output_pairs
+        else:
+            output_pairs = [(col_to_title.get(c, c), c) for c in columns]
+
+        output_to_col: Dict[str, str] = {}
+        for out_key, c in output_pairs:
+            if out_key and c:
+                output_to_col[out_key] = c
+
+        by_id: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            rid = row.get("id")
+            try:
+                rid_int = int(rid)
+            except Exception:
+                continue
+            record: Dict[str, Any] = {"id": rid_int}
+            for out_key, col in output_pairs:
+                value = row.get(col) if col else None
+                record[out_key] = _normalize_value(value)
+            _decode_record(
+                record,
+                row,
+                final_entity_key,
+                col_to_title,
+                output_to_col,
+                col_types,
+                {},
+                contact_names_map,
+                lead_titles_map,
+                user_names_map,
+                categories_map={},
+                stages_map={},
+                field_enum_map=field_enum_map,
+                col_to_b24_field=col_to_b24,
+                company_titles=company_titles_map,
+                company_data=company_data_map,
+                company_field_to_title=company_field_to_title_map,
+                company_field_enum_map=company_field_enum_map,
+                sp_categories_map={},
+            )
+            by_id[rid_int] = record
+
+        ordered = [by_id[i] for i in id_list if i in by_id]
+        out_fields = ["id"] + ([k for k, _ in output_pairs] if requested_output_pairs else [col_to_title.get(c, c) for c in columns])
+        return {
+            "ok": True,
+            "type": type,
+            "ids": id_list,
+            "fields": out_fields,
+            "data": ordered,
+        }
     except HTTPException:
         raise
     except Exception as e:

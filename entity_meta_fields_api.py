@@ -317,16 +317,16 @@ def _resolve_nested_entity_key(
 
 @router.get("/")
 def get_entity_meta_fields(
-    type: str = Query(..., description="Тип сущности: deal, contact, lead, smart_process"),
+    type: str = Query(..., description="Тип сущности: deal, contact, lead, company, smart_process"),
     entity_key: Optional[str] = Query(None, description="Для smart_process обязателен, например sp:1114"),
 ) -> Dict[str, Any]:
     """
     Возвращает поля сущности: id, b24_field, column_name, человеческое название, тип поля.
     """
-    if type not in ("smart_process", "deal", "contact", "lead"):
+    if type not in ("smart_process", "deal", "contact", "lead", "company"):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid type: '{type}'. Must be smart_process, deal, contact or lead",
+            detail=f"Invalid type: '{type}'. Must be smart_process, deal, contact, lead or company",
         )
 
     if type == "deal":
@@ -335,6 +335,8 @@ def get_entity_meta_fields(
         final_entity_key = "contact"
     elif type == "lead":
         final_entity_key = "lead"
+    elif type == "company":
+        final_entity_key = "company"
     else:
         if not entity_key:
             raise HTTPException(
