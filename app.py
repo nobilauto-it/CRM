@@ -499,6 +499,33 @@ def ensure_meta_tables(conn):
             created_on TIMESTAMPTZ DEFAULT now()
         );
         """)
+        # Конфиги entity-table по page_slug (дашборды/страницы фронта)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS entity_table_configs (
+            id BIGSERIAL PRIMARY KEY,
+            page_slug TEXT NOT NULL UNIQUE,
+            config_version INT NOT NULL DEFAULT 1,
+            config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            created_by TEXT,
+            updated_by TEXT
+        );
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS entity_table_config_revisions (
+            id BIGSERIAL PRIMARY KEY,
+            config_id BIGINT REFERENCES entity_table_configs(id) ON DELETE SET NULL,
+            page_slug TEXT NOT NULL,
+            revision_no INT NOT NULL,
+            config_version INT NOT NULL DEFAULT 1,
+            config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            created_by TEXT
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_entity_table_config_revisions_slug_created ON entity_table_config_revisions(page_slug, created_at DESC);")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_entity_table_config_revisions_slug_rev ON entity_table_config_revisions(page_slug, revision_no);")
     conn.commit()
 
 def get_sync_cursor(conn, entity_key: str) -> int:
@@ -3519,6 +3546,345 @@ def on_startup():
 # -----------------------------
 # API endpoints
 # -----------------------------
+ENTITY_TABLE_CONFIG_VERSION = 2
+
+
+def _ensure_entity_table_config_schema(conn) -> None:
+    """Safety net: create config tables even if /sync/schema wasn't called yet."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS entity_table_configs (
+                id BIGSERIAL PRIMARY KEY,
+                page_slug TEXT NOT NULL UNIQUE,
+                config_version INT NOT NULL DEFAULT 1,
+                config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                created_by TEXT,
+                updated_by TEXT
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS entity_table_config_revisions (
+                id BIGSERIAL PRIMARY KEY,
+                config_id BIGINT REFERENCES entity_table_configs(id) ON DELETE SET NULL,
+                page_slug TEXT NOT NULL,
+                revision_no INT NOT NULL,
+                config_version INT NOT NULL DEFAULT 1,
+                config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                created_by TEXT
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_entity_table_config_revisions_slug_created ON entity_table_config_revisions(page_slug, created_at DESC);")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_entity_table_config_revisions_slug_rev ON entity_table_config_revisions(page_slug, revision_no);")
+    conn.commit()
+
+
+def _entity_table_default_table() -> Dict[str, Any]:
+    return {
+        "table_title": "",
+        "table_description": "",
+        "entities": [],
+        "fields": [],
+        "column_order": [],
+        "column_widths": {},
+        "sort_key": None,
+        "sort_dir": None,
+        "show_time": False,
+        "date_time_display": {},
+        "filter_fields": [],
+    }
+
+
+def _entity_table_normalize_table(item: Any) -> Dict[str, Any]:
+    base = _entity_table_default_table()
+    src = item if isinstance(item, dict) else {}
+    out = dict(base)
+    for k in out.keys():
+        if k in src and src[k] is not None:
+            out[k] = src[k]
+    if not isinstance(out.get("entities"), list):
+        out["entities"] = []
+    if not isinstance(out.get("fields"), list):
+        out["fields"] = []
+    if not isinstance(out.get("column_order"), list):
+        out["column_order"] = []
+    if not isinstance(out.get("column_widths"), dict):
+        out["column_widths"] = {}
+    if not isinstance(out.get("date_time_display"), dict):
+        out["date_time_display"] = {}
+    if not isinstance(out.get("filter_fields"), list):
+        out["filter_fields"] = []
+    out["show_time"] = bool(out.get("show_time"))
+    return out
+
+
+def _entity_table_migrate_config(raw_cfg: Any) -> Tuple[Dict[str, Any], bool]:
+    """
+    Migrate legacy config to current contract (v2).
+    - old root entities/fields -> tables[0]
+    - ensure page_mode/table_modes/tables/default fields exist
+    """
+    changed = False
+    cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+    if not isinstance(raw_cfg, dict):
+        changed = True
+
+    out: Dict[str, Any] = {}
+    # page_mode
+    page_mode = cfg.get("page_mode")
+    if page_mode is None:
+        page_mode = "edit"
+        changed = True
+    out["page_mode"] = page_mode
+
+    # tables (supports legacy root format)
+    tables_in = cfg.get("tables")
+    if isinstance(tables_in, list) and tables_in:
+        out_tables = [_entity_table_normalize_table(t) for t in tables_in]
+    else:
+        legacy_keys = {
+            "table_title", "table_description", "entities", "fields", "column_order", "column_widths",
+            "sort_key", "sort_dir", "show_time", "date_time_display", "filter_fields",
+        }
+        legacy = {k: cfg.get(k) for k in legacy_keys if k in cfg}
+        out_tables = [_entity_table_normalize_table(legacy)]
+        changed = True
+    out["tables"] = out_tables
+
+    # table_modes
+    table_modes = cfg.get("table_modes")
+    if not isinstance(table_modes, dict):
+        table_modes = {str(i): "table" for i in range(len(out_tables))}
+        changed = True
+    else:
+        tm: Dict[str, Any] = {}
+        for i in range(len(out_tables)):
+            k = str(i)
+            v = table_modes.get(k, "table")
+            tm[k] = v if isinstance(v, str) and v else "table"
+        table_modes = tm
+    out["table_modes"] = table_modes
+
+    # version
+    in_version = cfg.get("config_version")
+    try:
+        in_version_int = int(in_version)
+    except Exception:
+        in_version_int = 1
+    if in_version_int < ENTITY_TABLE_CONFIG_VERSION:
+        changed = True
+    out["config_version"] = ENTITY_TABLE_CONFIG_VERSION
+    return out, changed
+
+
+def _entity_table_build_response(page_slug: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "page_slug": page_slug,
+        "config_version": int(cfg.get("config_version") or ENTITY_TABLE_CONFIG_VERSION),
+        "page_mode": cfg.get("page_mode", "edit"),
+        "table_modes": cfg.get("table_modes", {"0": "table"}),
+        "tables": cfg.get("tables", [_entity_table_default_table()]),
+    }
+
+
+def _entity_table_actor_from_request(request: Request) -> Optional[str]:
+    for hk in ("x-user-id", "x-user", "x-email", "x-login"):
+        v = request.headers.get(hk)
+        if v and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def _entity_table_is_guest(request: Request) -> bool:
+    role = (request.headers.get("x-user-role") or request.headers.get("x-role") or "").strip().lower()
+    x_guest = (request.headers.get("x-guest") or "").strip().lower()
+    return role == "guest" or x_guest in ("1", "true", "yes", "y", "on")
+
+
+@app.get("/api/entity-table/config")
+def get_entity_table_config(
+    page_slug: str = Query(..., description="Unique page slug"),
+):
+    slug = (page_slug or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="page_slug is required")
+
+    conn = pg_conn()
+    try:
+        _ensure_entity_table_config_schema(conn)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, page_slug, config_version, config_json
+                FROM entity_table_configs
+                WHERE page_slug=%s
+                LIMIT 1
+            """, (slug,))
+            row = cur.fetchone()
+
+        if not row:
+            cfg, _ = _entity_table_migrate_config({})
+            return _entity_table_build_response(slug, cfg)
+
+        raw_cfg = row.get("config_json") if isinstance(row, dict) else {}
+        cfg, changed = _entity_table_migrate_config(raw_cfg)
+        if changed:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE entity_table_configs
+                    SET config_json=%s::jsonb,
+                        config_version=%s,
+                        updated_at=now()
+                    WHERE page_slug=%s
+                """, (json.dumps(cfg, ensure_ascii=False), int(cfg.get("config_version") or ENTITY_TABLE_CONFIG_VERSION), slug))
+            conn.commit()
+        return _entity_table_build_response(slug, cfg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=repr(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.post("/api/entity-table/config")
+async def save_entity_table_config(request: Request):
+    if _entity_table_is_guest(request):
+        raise HTTPException(status_code=403, detail="Guest is not allowed to save config")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
+
+    slug = (
+        str(payload.get("page_slug") or "").strip()
+        or str(request.query_params.get("page_slug") or "").strip()
+    )
+    if not slug:
+        raise HTTPException(status_code=400, detail="page_slug is required")
+
+    # Accept both direct config payload and {config_json: {...}}
+    if isinstance(payload.get("config_json"), dict):
+        cfg_input = dict(payload.get("config_json") or {})
+        if "page_slug" not in cfg_input:
+            cfg_input["page_slug"] = slug
+    else:
+        cfg_input = dict(payload)
+
+    cfg_input.pop("ok", None)
+    cfg_input.pop("total", None)
+    cfg_input.pop("limit", None)
+    cfg_input.pop("offset", None)
+    cfg_input.pop("data", None)
+    cfg_input.pop("fields", None)
+    cfg_input.pop("entity_key", None)
+    cfg_input.pop("type", None)
+    cfg_input.pop("page_slug", None)
+
+    cfg, _ = _entity_table_migrate_config(cfg_input)
+    actor = _entity_table_actor_from_request(request)
+
+    conn = pg_conn()
+    try:
+        conn.autocommit = False
+        _ensure_entity_table_config_schema(conn)
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, created_by, created_at
+                FROM entity_table_configs
+                WHERE page_slug=%s
+                LIMIT 1
+            """, (slug,))
+            existing = cur.fetchone()
+
+            if existing:
+                config_id = int(existing["id"])
+                created_by = existing.get("created_by")
+                cur.execute("""
+                    UPDATE entity_table_configs
+                    SET config_json=%s::jsonb,
+                        config_version=%s,
+                        updated_at=now(),
+                        updated_by=%s
+                    WHERE id=%s
+                    RETURNING id
+                """, (
+                    json.dumps(cfg, ensure_ascii=False),
+                    int(cfg.get("config_version") or ENTITY_TABLE_CONFIG_VERSION),
+                    actor,
+                    config_id,
+                ))
+                cur.fetchone()
+            else:
+                created_by = actor
+                cur.execute("""
+                    INSERT INTO entity_table_configs(
+                        page_slug, config_version, config_json,
+                        created_at, updated_at, created_by, updated_by
+                    )
+                    VALUES (%s, %s, %s::jsonb, now(), now(), %s, %s)
+                    RETURNING id
+                """, (
+                    slug,
+                    int(cfg.get("config_version") or ENTITY_TABLE_CONFIG_VERSION),
+                    json.dumps(cfg, ensure_ascii=False),
+                    created_by,
+                    actor,
+                ))
+                ins = cur.fetchone()
+                config_id = int(ins["id"]) if ins else 0
+
+            cur.execute(
+                "SELECT COALESCE(MAX(revision_no), 0) AS mx FROM entity_table_config_revisions WHERE page_slug=%s",
+                (slug,),
+            )
+            mx_row = cur.fetchone() or {}
+            next_rev = int(mx_row.get("mx") or 0) + 1
+
+            cur.execute("""
+                INSERT INTO entity_table_config_revisions(
+                    config_id, page_slug, revision_no, config_version, config_json, created_at, created_by
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, now(), %s)
+            """, (
+                config_id if config_id > 0 else None,
+                slug,
+                next_rev,
+                int(cfg.get("config_version") or ENTITY_TABLE_CONFIG_VERSION),
+                json.dumps(cfg, ensure_ascii=False),
+                actor,
+            ))
+
+        conn.commit()
+        return _entity_table_build_response(slug, cfg)
+    except HTTPException:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=repr(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @app.get("/debug/lists-elements")
 def debug_lists_elements(
     iblock_id: int = Query(..., description="IBLOCK_ID списка (например 34 для Tracțiune)"),
