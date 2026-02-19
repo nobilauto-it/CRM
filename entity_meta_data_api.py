@@ -869,9 +869,16 @@ def get_entity_meta_data(
         id_values = list(dict.fromkeys(id_values))
         if id_values:
             id_values_str = [str(v) for v in id_values]
-            where_parts.append("(id = ANY(%s) OR COALESCE(raw->>'ID', raw->>'id', '') = ANY(%s))")
-            where_params.append(id_values)
+            id_predicates: List[str] = []
+            if "id" in existing_cols:
+                id_predicates.append("id = ANY(%s)")
+                where_params.append(id_values)
+            if "id_2" in existing_cols:
+                id_predicates.append("id_2::text = ANY(%s)")
+                where_params.append(id_values_str)
+            id_predicates.append("COALESCE(raw->>'ID', raw->>'id', '') = ANY(%s)")
             where_params.append(id_values_str)
+            where_parts.append("(" + " OR ".join(id_predicates) + ")")
 
         where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
         count_params: List[Any] = list(where_params)
@@ -885,7 +892,19 @@ def get_entity_meta_data(
             total = cur.fetchone()[0] if cur.rowcount else 0
 
         columns = list(all_columns)
-        title_to_col = {title: col for col, title in col_to_title.items()}
+        # При дублях human_title выбираем более "каноничную" колонку (id > id_2, title > title_2)
+        title_to_col: Dict[str, str] = {}
+        for col, title in col_to_title.items():
+            if title not in title_to_col:
+                title_to_col[title] = col
+                continue
+            prev = title_to_col[title]
+            if title == "ID" and col == "id":
+                title_to_col[title] = col
+            elif title == "Название" and col == "title":
+                title_to_col[title] = col
+            elif prev.endswith("_2") and not col.endswith("_2"):
+                title_to_col[title] = col
         col_to_b24 = _load_col_to_b24_field(conn, final_entity_key)
         # Алиасы для fields: human_title / column_name / b24_field (регистронезависимо)
         field_alias_to_col: Dict[str, str] = {}
@@ -1081,6 +1100,14 @@ def get_entity_meta_data(
                 company_field_enum_map=company_field_enum_map,
                 sp_categories_map=sp_categories_map,
             )
+            if final_entity_key == "company":
+                raw_obj = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+                rid = row.get("id") or row.get("id_2") or raw_obj.get("ID") or raw_obj.get("id")
+                rtitle = row.get("title") or row.get("title_2") or raw_obj.get("TITLE") or raw_obj.get("title")
+                if "ID" in record and (record.get("ID") is None or str(record.get("ID")).strip() == ""):
+                    record["ID"] = rid
+                if "Название" in record and (record.get("Название") is None or str(record.get("Название")).strip() == ""):
+                    record["Название"] = _normalize_value(rtitle) if rtitle is not None else rtitle
             data.append(record)
 
         out: Dict[str, Any] = {
@@ -1143,7 +1170,18 @@ def get_entity_meta_data_by_ids(
         existing_cols = _table_existing_columns(conn, table_name)
         col_to_title = {c: t for c, t in col_to_title.items() if c in existing_cols}
         all_columns = list(col_to_title.keys())
-        title_to_col = {title: col for col, title in col_to_title.items()}
+        title_to_col: Dict[str, str] = {}
+        for col, title in col_to_title.items():
+            if title not in title_to_col:
+                title_to_col[title] = col
+                continue
+            prev = title_to_col[title]
+            if title == "ID" and col == "id":
+                title_to_col[title] = col
+            elif title == "Название" and col == "title":
+                title_to_col[title] = col
+            elif prev.endswith("_2") and not col.endswith("_2"):
+                title_to_col[title] = col
         col_to_b24 = _load_col_to_b24_field(conn, final_entity_key)
 
         field_alias_to_col: Dict[str, str] = {}
@@ -1176,10 +1214,23 @@ def get_entity_meta_data_by_ids(
             conn, final_entity_key, query_columns, _load_meta_column_types(conn, final_entity_key)
         )
 
+        id_list_str = [str(v) for v in id_list]
+        where_parts: List[str] = []
+        params: List[Any] = []
+        if "id" in existing_cols:
+            where_parts.append("id = ANY(%s)")
+            params.append(id_list)
+        if "id_2" in existing_cols:
+            where_parts.append("id_2::text = ANY(%s)")
+            params.append(id_list_str)
+        where_parts.append("COALESCE(raw->>'ID', raw->>'id', '') = ANY(%s)")
+        params.append(id_list_str)
+        where_sql = " OR ".join(where_parts)
+
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f'SELECT {columns_str} FROM "{table_name}" WHERE id = ANY(%s)',
-                (id_list,),
+                f'SELECT {columns_str} FROM "{table_name}" WHERE ({where_sql})',
+                tuple(params),
             )
             rows = cur.fetchall() or []
 
@@ -1234,7 +1285,8 @@ def get_entity_meta_data_by_ids(
 
         by_id: Dict[int, Dict[str, Any]] = {}
         for row in rows:
-            rid = row.get("id")
+            raw_obj = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+            rid = row.get("id") or row.get("id_2") or raw_obj.get("ID") or raw_obj.get("id")
             try:
                 rid_int = int(rid)
             except Exception:
@@ -1264,6 +1316,14 @@ def get_entity_meta_data_by_ids(
                 company_field_enum_map=company_field_enum_map,
                 sp_categories_map={},
             )
+            if final_entity_key == "company":
+                raw_obj = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+                rid_val = row.get("id") or row.get("id_2") or raw_obj.get("ID") or raw_obj.get("id")
+                title_val = row.get("title") or row.get("title_2") or raw_obj.get("TITLE") or raw_obj.get("title")
+                if "ID" in record and (record.get("ID") is None or str(record.get("ID")).strip() == ""):
+                    record["ID"] = rid_val
+                if "Название" in record and (record.get("Название") is None or str(record.get("Название")).strip() == ""):
+                    record["Название"] = _normalize_value(title_val) if title_val is not None else title_val
             by_id[rid_int] = record
 
         ordered = [by_id[i] for i in id_list if i in by_id]
