@@ -629,8 +629,12 @@ def _decode_record(
             else:
                 # Для человекочитаемых ключей (Ответственный/assigned_by_name) отдаем имя, fallback на id.
                 record[title] = user_names_map.get(key) or key
-            # Тех.ключ для фронта (опционально) — полезен для фильтров/дебага.
-            if "assigned_by_id" not in record and title == "Ответственный":
+            # Тех.ключ assigned_by_id добавляем только если он был явно запрошен фронтом.
+            if (
+                "assigned_by_id" in output_to_col
+                and "assigned_by_id" not in record
+                and title == "Ответственный"
+            ):
                 record["assigned_by_id"] = key
         elif t in ("crm_contact", "contact"):
             if val is None:
