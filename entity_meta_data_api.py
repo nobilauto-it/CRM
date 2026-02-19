@@ -121,7 +121,7 @@ def _infer_column_type(column_name: str) -> Optional[str]:
     c = (column_name or "").strip().lower()
     if not c:
         return None
-    if c in ("assigned_by_id", "created_by_id", "modified_by_id", "moved_by_id",
+    if c in ("assigned_by_id", "assigned_by_name", "created_by_id", "modified_by_id", "moved_by_id",
              "last_activity_by", "last_activity_by_id", "created_by", "modified_by"):
         return "user"
     if c in ("contact_id", "contact", "contact_ids"):
@@ -584,44 +584,46 @@ def _decode_record(
                 record[title] = stages_map.get(str(val).strip(), val)
             continue
         if t in ("user", "crm_user", "assigned_by"):
-            raw_val = val
-            # fallback: пытаемся взять id из исходной строки по b24/column ключам
-            if raw_val in (None, "", 0, "0"):
-                b24_f = (col_to_b24_field or {}).get(col) or ""
-                candidates = [
-                    col,
-                    str(col).lower(),
-                    str(col).upper(),
-                    b24_f,
-                    str(b24_f).lower(),
-                    str(b24_f).upper(),
-                    "assigned_by_id",
-                    "ASSIGNED_BY_ID",
-                ]
-                for ck in candidates:
-                    if not ck:
-                        continue
-                    v = src_row.get(ck)
-                    if v not in (None, "", 0, "0"):
-                        raw_val = v
-                        break
-                if raw_val in (None, "", 0, "0"):
-                    raw_obj = src_row.get("raw")
-                    if isinstance(raw_obj, dict):
-                        for rk in ("ASSIGNED_BY_ID", "assigned_by_id", b24_f, str(b24_f).lower()):
-                            if not rk:
-                                continue
-                            v = raw_obj.get(rk)
-                            if v not in (None, "", 0, "0"):
-                                raw_val = v
-                                break
+            # Для user-полей всегда предпочитаем raw ID (ASSIGNED_BY_ID/assigned_by_id),
+            # даже если в текущей колонке лежит имя (assigned_by_name).
+            b24_f = (col_to_b24_field or {}).get(col) or ""
+            raw_id_val = None
+            candidates = [
+                "assigned_by_id",
+                "ASSIGNED_BY_ID",
+                b24_f,
+                str(b24_f).lower(),
+                str(b24_f).upper(),
+                col,
+                str(col).lower(),
+                str(col).upper(),
+            ]
+            for ck in candidates:
+                if not ck:
+                    continue
+                v = src_row.get(ck)
+                if v not in (None, "", 0, "0"):
+                    raw_id_val = v
+                    break
+            if raw_id_val in (None, "", 0, "0"):
+                raw_obj = src_row.get("raw")
+                if isinstance(raw_obj, dict):
+                    for rk in ("ASSIGNED_BY_ID", "assigned_by_id", b24_f, str(b24_f).lower()):
+                        if not rk:
+                            continue
+                        v = raw_obj.get(rk)
+                        if v not in (None, "", 0, "0"):
+                            raw_id_val = v
+                            break
 
+            # Если id не найден — fallback на текущее значение, но не пустую строку.
+            raw_val = raw_id_val if raw_id_val not in (None, "", 0, "0") else val
             if raw_val in (None, "", 0, "0"):
                 record[title] = ""
                 continue
 
             key = str(raw_val).strip()
-            # Даже при пустом lookup возвращаем id, чтобы фронт видел Ответственного.
+            # Даже при пустом lookup возвращаем id/значение, чтобы фронт видел Ответственного.
             record[title] = user_names_map.get(key) or key
             # Тех.ключ для фронта (опционально) — полезен для фильтров/дебага.
             if "assigned_by_id" not in record and (
@@ -834,6 +836,11 @@ def get_entity_meta_data(
             if b24_f:
                 field_alias_to_col[str(b24_f)] = col
                 field_alias_to_col[str(b24_f).lower()] = col
+        # Для deal: даже если "Ответственный" показывается через assigned_by_name,
+        # запрос fields=assigned_by_id должен явно маппиться в raw id колонку.
+        if final_entity_key == "deal" and _table_has_column(conn, table_name, "assigned_by_id"):
+            field_alias_to_col["assigned_by_id"] = "assigned_by_id"
+            field_alias_to_col["ASSIGNED_BY_ID"] = "assigned_by_id"
         if fields:
             requested_titles = [s.strip() for s in fields.split(",") if s.strip()]
             if requested_titles:
@@ -864,7 +871,7 @@ def get_entity_meta_data(
             if c == "assigned_by_id" or (col_to_b24.get(c, "").upper() == "ASSIGNED_BY_ID"):
                 has_user_requested = True
                 break
-        if has_user_requested and "assigned_by_id" in all_columns and "assigned_by_id" not in query_columns:
+        if has_user_requested and _table_has_column(conn, table_name, "assigned_by_id") and "assigned_by_id" not in query_columns:
             query_columns.append("assigned_by_id")
 
         columns_str = ", ".join(f'"{c}"' for c in query_columns)
