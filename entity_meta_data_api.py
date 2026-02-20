@@ -7,6 +7,7 @@ GET /api/entity-meta-data/?type=deal&limit=10&offset=0
 GET /api/entity-meta-data/?type=smart_process&entity_key=sp:1114&limit=10&offset=0
 """
 import sys
+import json
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -476,6 +477,103 @@ def _load_field_enum_map(conn, entity_key: str, b24_fields: List[str]) -> Dict[T
     return out
 
 
+def _load_iblock_field_ids(conn, entity_key: str) -> Dict[str, str]:
+    """b24_field -> iblock_id для полей типа iblock_element."""
+    out: Dict[str, str] = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT b24_field, b24_type, settings
+                FROM b24_meta_fields
+                WHERE entity_key = %s
+                """,
+                (entity_key,),
+            )
+            for row in cur.fetchall() or []:
+                b24_field = (row.get("b24_field") or "").strip()
+                b24_type = (row.get("b24_type") or "").strip().lower()
+                if not b24_field or b24_type != "iblock_element":
+                    continue
+                settings = row.get("settings")
+                if isinstance(settings, str):
+                    try:
+                        settings = json.loads(settings)
+                    except Exception:
+                        settings = {}
+                if not isinstance(settings, dict):
+                    settings = {}
+                iblock_id = settings.get("IBLOCK_ID") or settings.get("iblock_id")
+                if iblock_id not in (None, ""):
+                    out[b24_field] = str(iblock_id).strip()
+    except Exception:
+        pass
+    return out
+
+
+def _load_iblock_element_names(conn, iblock_ids: List[str]) -> Dict[Tuple[str, str], str]:
+    """(iblock_id, element_id) -> name из b24_iblock_elements."""
+    out: Dict[Tuple[str, str], str] = {}
+    if not iblock_ids:
+        return out
+    normalized_ids: List[int] = []
+    for x in iblock_ids:
+        try:
+            normalized_ids.append(int(str(x).strip()))
+        except Exception:
+            continue
+    normalized_ids = list(dict.fromkeys(normalized_ids))
+    if not normalized_ids:
+        return out
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT iblock_id, element_id, name
+                FROM b24_iblock_elements
+                WHERE iblock_id = ANY(%s)
+                """,
+                (normalized_ids,),
+            )
+            for row in cur.fetchall() or []:
+                iblock_id = row.get("iblock_id")
+                element_id = row.get("element_id")
+                name = row.get("name")
+                if iblock_id is None or element_id is None:
+                    continue
+                out[(str(iblock_id).strip(), str(element_id).strip())] = normalize_string(
+                    name or str(element_id)
+                )
+    except Exception:
+        pass
+    return out
+
+
+def _iblock_value_to_title(
+    val: Any,
+    b24_field: str,
+    iblock_field_ids: Dict[str, str],
+    iblock_element_names: Dict[Tuple[str, str], str],
+) -> Any:
+    """Расшифровывает значение iblock_element по (iblock_id, element_id)."""
+    if val is None or not b24_field:
+        return val
+    iblock_id = iblock_field_ids.get(b24_field)
+    if not iblock_id:
+        return val
+
+    def _decode_one(x: Any) -> Any:
+        s = str(x).strip()
+        if not s:
+            return x
+        key_id = s.split("|")[0].strip() if "|" in s else s
+        return iblock_element_names.get((iblock_id, key_id), x)
+
+    if isinstance(val, list):
+        return [_decode_one(x) for x in val]
+    return _decode_one(val)
+
+
 def _source_value_to_title(val: Any, sources: Dict[str, str]) -> Any:
     """Подставляет название источника по ID; значение может быть 'id' или 'id|TYPE' (например UC_Z315Y5 или 60|TELEGRAM)."""
     if val is None:
@@ -562,6 +660,8 @@ def _decode_record(
     company_field_to_title: Optional[Dict[str, str]] = None,
     company_field_enum_map: Optional[Dict[Tuple[str, str], str]] = None,
     sp_categories_map: Optional[Dict[str, str]] = None,
+    iblock_field_ids: Optional[Dict[str, str]] = None,
+    iblock_element_names: Optional[Dict[Tuple[str, str], str]] = None,
 ) -> None:
     """
     Подставляет в record человекочитаемые значения вместо ID для полей типа user, crm_contact, crm_lead,
@@ -579,6 +679,8 @@ def _decode_record(
     company_field_to_title = company_field_to_title or {}
     company_field_enum_map = company_field_enum_map or {}
     sp_categories_map = sp_categories_map or {}
+    iblock_field_ids = iblock_field_ids or {}
+    iblock_element_names = iblock_element_names or {}
     for title, col in output_to_col.items():
         val = record.get(title)
         if val is None and title not in record:
@@ -669,6 +771,18 @@ def _decode_record(
                 record[title] = obj if obj else company_titles.get(key, val)
             else:
                 record[title] = company_titles.get(key, val)
+        elif t == "iblock_element":
+            b24_f = col_to_b24_field.get(col)
+            decoded = _iblock_value_to_title(
+                val,
+                b24_f or "",
+                iblock_field_ids,
+                iblock_element_names,
+            )
+            if decoded == val and field_enum_map and b24_f:
+                decoded = _enum_value_to_title(val, field_enum_map, b24_f)
+            if decoded is not val:
+                record[title] = decoded
         elif (col == "source_id" or (col and col.upper() == "SOURCE_ID")) and (
             entity_key in ("deal", "lead", "contact") or (entity_key or "").startswith("sp:")
         ):
@@ -1056,6 +1170,9 @@ def get_entity_meta_data(
         )
         b24_fields_for_enum = list(dict.fromkeys(col_to_b24.values())) if col_to_b24 else []
         field_enum_map = _load_field_enum_map(conn, final_entity_key, b24_fields_for_enum) if b24_fields_for_enum else {}
+        iblock_field_ids = _load_iblock_field_ids(conn, final_entity_key)
+        iblock_ids = list(dict.fromkeys(iblock_field_ids.values())) if iblock_field_ids else []
+        iblock_element_names = _load_iblock_element_names(conn, iblock_ids) if iblock_ids else {}
 
         output_pairs: List[Tuple[str, Optional[str]]]
         if requested_output_pairs:
@@ -1099,6 +1216,8 @@ def get_entity_meta_data(
                 company_field_to_title=company_field_to_title_map,
                 company_field_enum_map=company_field_enum_map,
                 sp_categories_map=sp_categories_map,
+                iblock_field_ids=iblock_field_ids,
+                iblock_element_names=iblock_element_names,
             )
             if final_entity_key == "company":
                 raw_obj = row.get("raw") if isinstance(row.get("raw"), dict) else {}
@@ -1272,6 +1391,9 @@ def get_entity_meta_data_by_ids(
         company_field_enum_map = _load_field_enum_map(conn, "company", company_b24_fields) if company_b24_fields else {}
         user_names_map = _load_user_names(conn, list(dict.fromkeys(user_ids))) if user_ids else {}
         field_enum_map = _load_field_enum_map(conn, final_entity_key, list(dict.fromkeys(col_to_b24.values()))) if col_to_b24 else {}
+        iblock_field_ids = _load_iblock_field_ids(conn, final_entity_key)
+        iblock_ids = list(dict.fromkeys(iblock_field_ids.values())) if iblock_field_ids else []
+        iblock_element_names = _load_iblock_element_names(conn, iblock_ids) if iblock_ids else {}
 
         if requested_output_pairs:
             output_pairs: List[Tuple[str, Optional[str]]] = requested_output_pairs
@@ -1315,6 +1437,8 @@ def get_entity_meta_data_by_ids(
                 company_field_to_title=company_field_to_title_map,
                 company_field_enum_map=company_field_enum_map,
                 sp_categories_map={},
+                iblock_field_ids=iblock_field_ids,
+                iblock_element_names=iblock_element_names,
             )
             if final_entity_key == "company":
                 raw_obj = row.get("raw") if isinstance(row.get("raw"), dict) else {}

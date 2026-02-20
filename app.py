@@ -1406,10 +1406,10 @@ def sync_field_enums(conn, entity_key: str) -> Tuple[int, List[str]]:
                     items = [{"ID": k, "VALUE": _title_from(v)} for k, v in raw_items.items() if str(k).strip() != ""]
             else:
                 items = raw_items if isinstance(raw_items, list) else []
-            if not items and use_smart_api:
+            if not items:
                 # Списочные поля смарт-процесса часто хранят entityId в settings — варианты через crm.status.entity.items.
                 # Пробуем для любого поля (Transmisie, Tractiune, Filiala и т.д. могут не иметь type=list в ответе).
-                settings = uf.get("settings") or {}
+                settings = uf.get("settings") or uf.get("SETTINGS") or {}
                 if isinstance(settings, dict):
                     eid = (
                         settings.get("entityId") or settings.get("ENTITY_ID")
@@ -1444,12 +1444,18 @@ def sync_field_enums(conn, entity_key: str) -> Tuple[int, List[str]]:
                         except Exception as e:
                             debug_notes.append(f"{entity_key}: {field_name} status.entity.items: {e}")
                             print(f"WARNING: sync_field_enums({entity_key}): {field_name} entityId={eid} -> {e}", file=sys.stderr, flush=True)
-            if not items and use_smart_api:
+            if not items:
                 # Поля типа iblock_element (Transmisie, Tracțiune, Filiala и т.д.) — варианты в инфоблоке, в settings есть IBLOCK_ID
-                settings = uf.get("settings") or {}
+                settings = uf.get("settings") or uf.get("SETTINGS") or {}
                 if isinstance(settings, dict):
                     _iblock_id = settings.get("IBLOCK_ID")
-                    if _iblock_id is not None and (uf.get("type") or "").strip().lower() == "iblock_element":
+                    field_type = (
+                        uf.get("type")
+                        or uf.get("USER_TYPE_ID")
+                        or uf.get("userTypeId")
+                        or ""
+                    )
+                    if _iblock_id is not None and str(field_type).strip().lower() == "iblock_element":
                         try:
                             iblock_id = int(_iblock_id)
                             # Пробуем lists.element.get (REST Bitrix24 — элементы списка по IBLOCK_ID)
@@ -4568,5 +4574,6 @@ def sync_users_endpoint(
         raise HTTPException(status_code=500, detail=repr(e))
     finally:
         conn.close()
+
 
 
